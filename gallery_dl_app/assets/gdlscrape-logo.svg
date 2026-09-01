@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">GdlScrape logo</title>
+  <desc id="desc">A sharp symmetrical winged emblem with a central spark and a downward download point.</desc>
+  <defs>
+    <mask id="sparkCut">
+      <rect width="512" height="512" fill="white"/>
+      <path d="M256 181c9 19 23 32 46 39-23 7-37 21-46 42-9-21-23-35-46-42 23-7 37-20 46-39Z" fill="black"/>
+    </mask>
+  </defs>
+
+  <g transform="translate(0 64) scale(1 .75)">
+  <g mask="url(#sparkCut)">
+    <g fill="#071826">
+      <path d="M252 82c-3 48-25 86-67 117l27 17c24-30 38-76 40-134Z"/>
+      <path d="M260 82c3 48 25 86 67 117l-27 17c-24-30-38-76-40-134Z"/>
+
+      <path d="M25 129c69 35 132 55 199 84-27-30-73-62-142-95 2 23 13 42 34 56-31-12-60-27-91-45Z"/>
+      <path d="M487 129c-69 35-132 55-199 84 27-30 73-62 142-95-2 23-13 42-34 56 31-12 60-27 91-45Z"/>
+
+      <path d="M57 204c52 9 98 29 137 61-34-35-75-59-123-73 3 15 13 28 29 39-16-6-30-15-43-27Z"/>
+      <path d="M455 204c-52 9-98 29-137 61 34-35 75-59 123-73-3 15-13 28-29 39 16-6 30-15 43-27Z"/>
+
+      <path d="M132 188c56 18 98 54 124 108 26-54 68-90 124-108-35 46-74 108-124 226-50-118-89-180-124-226Z"/>
+    </g>
+
+    <path d="M252 82c-4 45-24 82-59 111 32-20 52-58 59-111Z" fill="#36e7ff"/>
+    <path d="M260 82c4 45 24 82 59 111-32-20-52-58-59-111Z" fill="#f038d1"/>
+    <path d="M145 199c56 32 94 93 111 187-24-85-61-140-111-187Z" fill="#35e5c7"/>
+    <path d="M367 199c-56 32-94 93-111 187 24-85 61-140 111-187Z" fill="#9b51ff"/>
+  </g>
+  </g>
+</svg>
