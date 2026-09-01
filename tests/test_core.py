@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -25,7 +26,6 @@ from gallery_dl_app.queue_controller import (
 )
 from gallery_dl_app.reports import (
     ReportsMixin,
-    app_data_backup_members,
     is_restorable_autosave,
     scan_output_tree,
     write_app_data_backup,
@@ -1395,14 +1395,14 @@ class BackupTests(unittest.TestCase):
             old_backup.write_bytes(b"old backup")
             target = backup_dir / "app_data_backup_new.zip"
 
-            members = app_data_backup_members(app_dir, backup_dir, target)
-            relative = {path.relative_to(app_dir).as_posix() for path in members}
+            write_app_data_backup(app_dir, backup_dir, target)
+            with zipfile.ZipFile(target) as archive:
+                relative = set(archive.namelist())
 
         self.assertEqual(
             relative,
             {"autosave_session.json", "profiles/default.json"},
         )
-        self.assertNotIn(old_backup, members)
 
     def test_failed_app_data_backup_preserves_existing_target(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -57,21 +57,62 @@ def app_data_backup_members(
 ) -> list[Path]:
     """Return safe app-data files without nesting previous backups."""
 
-    app_root = Path(app_dir).expanduser().resolve()
-    backup_root = Path(backup_dir).expanduser().resolve()
-    target_resolved = Path(target).expanduser().resolve()
-    members: list[Path] = []
-    for file in app_root.rglob("*"):
-        if not file.is_file() or file.is_symlink():
-            continue
+    return [file for file, _relative in _app_data_backup_entries(app_dir, backup_dir, target)]
+
+
+def _app_data_backup_entries(
+    app_dir: str | Path,
+    backup_dir: str | Path,
+    target: str | Path,
+) -> list[tuple[Path, Path]]:
+    """Return source files paired with stable archive-relative paths.
+
+    Windows runners can expose the same temporary directory through both an
+    8.3 alias (``RUNNER~1``) and its long name (``runneradmin``). Tracking the
+    relative path while walking avoids fragile string-based ``relative_to``
+    comparisons between those equivalent spellings.
+    """
+
+    app_input = Path(os.path.abspath(Path(app_dir).expanduser()))
+    backup_input = Path(os.path.abspath(Path(backup_dir).expanduser()))
+    target_input = Path(os.path.abspath(Path(target).expanduser()))
+    try:
+        backup_relative = backup_input.relative_to(app_input)
+    except ValueError:
+        backup_relative = None
+    try:
+        target_relative = target_input.relative_to(app_input)
+    except ValueError:
+        target_relative = None
+
+    entries: list[tuple[Path, Path]] = []
+    pending: list[tuple[Path, Path]] = [(app_input, Path())]
+    while pending:
+        directory, relative_directory = pending.pop()
         try:
-            resolved = file.resolve()
-            if resolved == target_resolved or resolved.is_relative_to(backup_root):
-                continue
+            children = list(os.scandir(directory))
         except OSError:
             continue
-        members.append(file)
-    return members
+        for child in children:
+            relative = relative_directory / child.name
+            try:
+                if child.is_symlink():
+                    continue
+                if child.is_dir(follow_symlinks=False):
+                    pending.append((Path(child.path), relative))
+                    continue
+                if not child.is_file(follow_symlinks=False):
+                    continue
+            except OSError:
+                continue
+            if target_relative is not None and relative == target_relative:
+                continue
+            if backup_relative is not None and (
+                relative == backup_relative or relative.is_relative_to(backup_relative)
+            ):
+                continue
+            entries.append((Path(child.path), relative))
+    return entries
 
 
 def write_app_data_backup(
@@ -81,19 +122,18 @@ def write_app_data_backup(
     stop_event: threading.Event | None = None,
 ) -> None:
     """Create a ZIP atomically, preserving an existing target on failure."""
-    app_root = Path(app_dir).expanduser().resolve()
     target_path = Path(target).expanduser()
     target_path.parent.mkdir(parents=True, exist_ok=True)
-    members = app_data_backup_members(app_root, backup_dir, target_path)
+    entries = _app_data_backup_entries(app_dir, backup_dir, target_path)
     tmp = target_path.with_name(
         f"{target_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
     )
     try:
         with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for file in members:
+            for file, relative in entries:
                 if stop_event is not None and stop_event.is_set():
                     raise InterruptedError("backup cancelled")
-                zf.write(file, file.relative_to(app_root))
+                zf.write(file, relative)
         os.replace(tmp, target_path)
     finally:
         try:
