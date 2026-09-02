@@ -20,6 +20,7 @@ build/
 dist/
 release/
 *.spec
+!packaging/GdlScrape.spec
 
 downloads/
 *.log

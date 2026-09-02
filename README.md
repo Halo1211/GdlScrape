@@ -123,7 +123,7 @@ Build a Windows executable with:
 .\scripts\build_windows.ps1
 ```
 
-The script produces a self-contained Windows application at `release/GdlScrape/GdlScrape.exe`. Keep the generated `_internal` directory beside the executable; it contains the Qt and Python runtime files required by the application. The release directory is intentionally ignored by Git. See [ARCHITECTURE.md](ARCHITECTURE.md) for component boundaries and [CONTRIBUTING.md](CONTRIBUTING.md) before submitting changes.
+The script produces a standalone Windows executable at `release/GdlScrape.exe`. It can be distributed as a single file and does not require a separate Python installation. The release directory is intentionally ignored by Git. See [ARCHITECTURE.md](ARCHITECTURE.md) for component boundaries and [CONTRIBUTING.md](CONTRIBUTING.md) before submitting changes.
 
 ## Data location
 
