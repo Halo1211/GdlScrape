@@ -23,4 +23,4 @@ The architecture and security rules in [ARCHITECTURE.md](ARCHITECTURE.md) are pa
 
 ## Licensing note
 
-The project owner has not selected an open-source license yet. Discuss contribution licensing with the owner before submitting a pull request.
+By contributing to GdlScrape, you agree that your contributions are provided under the project's [MIT License](LICENSE).

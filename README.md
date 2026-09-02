@@ -135,4 +135,4 @@ This repository represents **GdlScrape v1.0**. See [CHANGELOG.md](CHANGELOG.md) 
 
 ## License
 
-No open-source license has been selected yet. Unless a license is added, the source remains **all rights reserved**. Choose a license before inviting third-party redistribution or contributions.
+GdlScrape is released under the [MIT License](LICENSE).
