@@ -32,6 +32,9 @@ from PySide6.QtWidgets import (
 )
 
 
+from .themes import application_icon
+
+
 class ActivityGraph(QWidget):
     """Small neon activity trace; intentionally data-light and inexpensive."""
 
@@ -140,7 +143,9 @@ class DashboardUiMixin:
         self.lbl_brand_mark.setObjectName("brandMark")
         self.lbl_brand_mark.setFixedWidth(38)
         self.lbl_brand_mark.setAlignment(Qt.AlignCenter)
-        self.lbl_brand_mark.setPixmap(self.windowIcon().pixmap(30, 30))
+        self.lbl_brand_mark.setPixmap(
+            application_icon(dark=self.current_theme == "dark").pixmap(30, 30)
+        )
         self.lbl_brand_mark.setAccessibleName("GdlScrape logo")
         brand = QVBoxLayout()
         brand.setSpacing(0)
