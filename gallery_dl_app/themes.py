@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import platform
+from functools import lru_cache
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt
@@ -18,9 +19,11 @@ def _colorref(hex_color: str) -> int:
     return red | (green << 8) | (blue << 16)
 
 
-def application_icon() -> QIcon:
-    """Load the GdlScrape brand mark, with a generated fallback icon."""
-    logo_path = Path(__file__).resolve().parent / "assets" / "gdlscrape-logo.svg"
+@lru_cache(maxsize=2)
+def application_icon(dark: bool = True) -> QIcon:
+    """Load the theme-aware GdlScrape brand mark, with a generated fallback."""
+    asset_name = "gdlscrape-logo-dark.png" if dark else "gdlscrape-logo-light.png"
+    logo_path = Path(__file__).resolve().parent / "assets" / asset_name
     if logo_path.is_file():
         branded_icon = QIcon(str(logo_path))
         if not branded_icon.isNull():

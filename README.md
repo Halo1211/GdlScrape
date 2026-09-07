@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="docs/images/gdlscrape-logo.png" alt="GdlScrape logo" width="180">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/gdlscrape-logo-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="docs/images/gdlscrape-logo-light.png">
+    <img src="docs/images/gdlscrape-logo-light.png" alt="GdlScrape logo" width="180">
+  </picture>
 </p>
 
 <h1 align="center">GdlScrape</h1>

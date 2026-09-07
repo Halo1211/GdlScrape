@@ -54,7 +54,7 @@ from .core import (
     unique_path,
 )
 from .models import DownloadJob
-from .themes import DARK_QSS, LIGHT_QSS, apply_native_window_theme, theme_palette
+from .themes import DARK_QSS, LIGHT_QSS, application_icon, apply_native_window_theme, theme_palette
 from .workers import CommandProbeWorker, DownloadWorker
 
 
@@ -1201,14 +1201,23 @@ Notes:
         if app is None:
             return
         self.current_theme = normalized
-        app.setPalette(theme_palette(normalized == "dark"))
-        app.setStyleSheet(DARK_QSS if normalized == "dark" else LIGHT_QSS)
+        dark = normalized == "dark"
+        app.setPalette(theme_palette(dark))
+        app.setStyleSheet(DARK_QSS if dark else LIGHT_QSS)
+        icon = application_icon(dark=dark)
+        app.setWindowIcon(icon)
+        self.setWindowIcon(icon)
+        brand_mark = getattr(self, "lbl_brand_mark", None)
+        if brand_mark is not None:
+            brand_mark.setPixmap(icon.pixmap(30, 30))
+        if self.tray_icon is not None:
+            self.tray_icon.setIcon(icon)
         theme_filter = getattr(app, "_native_window_theme_filter", None)
         if theme_filter is not None:
-            theme_filter.set_dark(normalized == "dark")
+            theme_filter.set_dark(dark)
         else:
             # Fallback for a window constructed outside create_application().
-            apply_native_window_theme(self, normalized == "dark")
+            apply_native_window_theme(self, dark)
 
         selector = getattr(self, "combo_theme", None)
         if selector is not None:

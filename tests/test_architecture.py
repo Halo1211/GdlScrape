@@ -100,10 +100,14 @@ class ArchitectureTests(unittest.TestCase):
                 [window.combo_theme.itemData(index) for index in range(window.combo_theme.count())],
                 ["dark", "light"],
             )
+            dark_icon = window.windowIcon().pixmap(64, 64).toImage()
             window.set_theme("light", persist=False)
             self.assertEqual(window.current_theme, "light")
             self.assertEqual(window.combo_theme.currentData(), "light")
             self.assertGreater(app.palette().color(QPalette.Window).lightness(), 200)
+            light_icon = window.windowIcon().pixmap(64, 64).toImage()
+            self.assertNotEqual(dark_icon, light_icon)
+            self.assertFalse(window.lbl_brand_mark.pixmap().isNull())
             native_filter = getattr(app, "_native_window_theme_filter", None)
             self.assertIsNotNone(native_filter)
             self.assertFalse(native_filter.dark)
@@ -121,6 +125,7 @@ class ArchitectureTests(unittest.TestCase):
             window.set_theme("dark", persist=False)
             self.assertLess(app.palette().color(QPalette.Window).lightness(), 80)
             self.assertTrue(native_filter.dark)
+            self.assertEqual(window.windowIcon().pixmap(64, 64).toImage(), dark_icon)
             described_controls = [
                 window.combo_theme,
                 window.txt_commands,

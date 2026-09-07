@@ -26,7 +26,7 @@ def create_application(argv: list[str] | None = None) -> tuple[QApplication, Mai
     font = QFont(family, 10)
     font.setStyleStrategy(QFont.PreferAntialias)
     app.setFont(font)
-    icon = application_icon()
+    icon = application_icon(dark=True)
     app.setWindowIcon(icon)
     app.setPalette(theme_palette(True))
     app.setStyleSheet(DARK_QSS)
@@ -38,7 +38,7 @@ def create_application(argv: list[str] | None = None) -> tuple[QApplication, Mai
     else:
         theme_filter.set_dark(True)
     window = MainWindow()
-    window.setWindowIcon(icon)
+    window.setWindowIcon(application_icon(dark=window.current_theme == "dark"))
     return app, window
 
 

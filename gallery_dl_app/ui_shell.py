@@ -83,7 +83,7 @@ class UiShellMixin:
         header = QHBoxLayout()
         self.lbl_brand_mark = QLabel()
         self.lbl_brand_mark.setObjectName("brandMark")
-        self.lbl_brand_mark.setPixmap(application_icon().pixmap(38, 38))
+        self.lbl_brand_mark.setPixmap(application_icon(dark=getattr(self, "current_theme", "dark") == "dark").pixmap(38, 38))
         self.lbl_brand_mark.setFixedSize(42, 42)
         self.lbl_brand_mark.setAlignment(Qt.AlignCenter)
         self.lbl_brand_mark.setAccessibleName("GdlScrape logo")
