@@ -34,6 +34,12 @@ FALLBACK_OPTIONS = [
 ]
 
 
+def _option_requires_value(signature_tail: str) -> bool:
+    """Distinguish required metavariables from fully optional ones."""
+    remainder = signature_tail.strip()
+    return bool(remainder) and re.fullmatch(r"\[[^\]]+\]", remainder) is None
+
+
 def parse_help_options(text: str) -> list[tuple[str, str, bool]]:
     """Parse the installed gallery-dl help output into a searchable catalog."""
     options: dict[str, tuple[str, str, bool]] = {}
@@ -57,7 +63,11 @@ def parse_help_options(text: str) -> list[tuple[str, str, bool]]:
                 continue
             current = flag_match.group(0)
             remainder = flag_blob[flag_match.end():].strip()
-            options[current] = (current, description.strip(), bool(remainder))
+            options[current] = (
+                current,
+                description.strip(),
+                _option_requires_value(remainder),
+            )
         elif line.startswith("  ") and "--" in line:
             # Long signatures such as --cookies-from-browser have no room for
             # a same-line description; argparse wraps the description onto the
@@ -69,7 +79,7 @@ def parse_help_options(text: str) -> list[tuple[str, str, bool]]:
                 continue
             current = flag_match.group(0)
             remainder = line[flag_match.end():].strip()
-            options[current] = (current, "", bool(remainder))
+            options[current] = (current, "", _option_requires_value(remainder))
         elif current and line.startswith(" " * 8) and line.strip():
             flag, description, requires_value = options[current]
             options[current] = (flag, f"{description} {line.strip()}".strip(), requires_value)
@@ -89,7 +99,7 @@ def build_filter_expression(rules: Iterable[tuple[str, str, str]], joiner: str =
         raw_value = str(raw_value).strip()
         if not field and not raw_value:
             continue
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.\[\]-]*", field):
+        if not _is_valid_filter_field(field):
             raise ValueError(f"Invalid metadata field: {field}")
         if operator not in allowed_operators:
             raise ValueError(f"Unsupported operator: {operator}")
@@ -101,6 +111,47 @@ def build_filter_expression(rules: Iterable[tuple[str, str, str]], joiner: str =
         else:
             expressions.append(f"{field} {operator} {value}")
     return f" {conjunction} ".join(expressions)
+
+
+def _is_valid_filter_field(field: str) -> bool:
+    """Accept metadata lookups without allowing them to become expressions.
+
+    The visual builder supports normal keys, dotted attributes, and indexed
+    lookups such as ``items[-1]``.  A character-only regular expression is not
+    enough here: it also accepted ``width-height`` as subtraction and malformed
+    values such as ``metadata[`` that gallery-dl later rejected.  Validate the
+    parsed expression shape and reject Python's introspection attributes.
+    """
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.\[\]-]*", field):
+        return False
+    try:
+        node = ast.parse(field, mode="eval").body
+    except SyntaxError:
+        return False
+
+    def valid(part: ast.AST) -> bool:
+        if isinstance(part, ast.Name):
+            return not part.id.startswith("__")
+        if isinstance(part, ast.Attribute):
+            return not part.attr.startswith("__") and valid(part.value)
+        if isinstance(part, ast.Subscript):
+            return valid(part.value) and valid_index(part.slice)
+        return False
+
+    def valid_index(part: ast.AST) -> bool:
+        if isinstance(part, ast.Name):
+            return not part.id.startswith("__")
+        if isinstance(part, ast.Constant):
+            return isinstance(part.value, int) and not isinstance(part.value, bool)
+        return (
+            isinstance(part, ast.UnaryOp)
+            and isinstance(part.op, ast.USub)
+            and isinstance(part.operand, ast.Constant)
+            and isinstance(part.operand.value, int)
+            and not isinstance(part.operand.value, bool)
+        )
+
+    return valid(node)
 
 
 def _filter_value(raw: str) -> str:
@@ -123,7 +174,7 @@ def next_schedule_time(schedule: dict[str, object], now: float | None = None) ->
     if frequency == "interval":
         try:
             minutes = max(1, min(int(schedule.get("interval_minutes") or 60), 10080))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             minutes = 60
         return (moment + timedelta(minutes=minutes)).timestamp()
 
@@ -139,7 +190,11 @@ def next_schedule_time(schedule: dict[str, object], now: float | None = None) ->
         candidate += timedelta(days=1)
     if frequency == "weekly":
         try:
-            weekdays = {int(value) for value in str(schedule.get("weekdays") or "0").split(",")}
+            weekdays = {
+                int(value.strip())
+                for value in str(schedule.get("weekdays") or "0").split(",")
+                if value.strip()
+            }
         except ValueError:
             weekdays = {0}
         weekdays = {day for day in weekdays if 0 <= day <= 6} or {0}

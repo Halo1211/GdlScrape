@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 )
 
 
+from .core import APP_VERSION
 from .themes import application_icon
 
 
@@ -183,7 +184,7 @@ class DashboardUiMixin:
         )
         self.lbl_ready = QLabel("READY")
         self.lbl_ready.setObjectName("statusPill")
-        self.lbl_app_version = QLabel("v1.0  •  DESKTOP")
+        self.lbl_app_version = QLabel(f"v{APP_VERSION}  •  DESKTOP")
         self.lbl_app_version.setObjectName("versionLabel")
 
         header_l.addWidget(self.lbl_brand_mark)

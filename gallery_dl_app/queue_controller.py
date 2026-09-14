@@ -37,6 +37,7 @@ from .core import (
     parse_text_database,
     read_text_safely,
     redact_sensitive_text,
+    safe_expand_path,
     safe_int,
 )
 from .models import JobResult
@@ -46,6 +47,8 @@ from .workers import DownloadWorker
 
 MAX_XLSX_UNCOMPRESSED_BYTES = 128 * 1024 * 1024
 MAX_XLSX_ARCHIVE_MEMBERS = 4096
+MAX_XLSX_COLUMNS = 256
+MAX_XLSX_CELLS = 2_000_000
 
 
 def _validate_import_record(row_number: int, *values: object) -> None:
@@ -407,6 +410,24 @@ class QueueControllerMixin:
         )
         try:
             ws = wb.active
+            try:
+                declared_rows = max(0, int(ws.max_row or 0))
+                declared_columns = max(0, int(ws.max_column or 0))
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError("XLSX worksheet has invalid declared dimensions.") from exc
+            if declared_rows > MAX_QUEUE_SOURCE_ROWS:
+                raise ValueError(
+                    f"Import exceeds the {MAX_QUEUE_SOURCE_ROWS:,} source-row safety limit. "
+                    "Split it into smaller files."
+                )
+            if (
+                declared_columns > MAX_XLSX_COLUMNS
+                or declared_rows * declared_columns > MAX_XLSX_CELLS
+            ):
+                raise ValueError(
+                    "XLSX worksheet dimensions exceed the safety limit "
+                    f"({declared_rows:,} rows x {declared_columns:,} columns)."
+                )
             iterator = ws.iter_rows(values_only=True)
             try:
                 header_values = next(iterator)
@@ -448,13 +469,17 @@ class QueueControllerMixin:
                             output.append(f"#@notes {notes}")
                         output.append(cmd)
             else:
-                first_header = str(header_values[0] or "").strip() if header_values else ""
+                first_header = (
+                    " ".join(str(header_values[0] or "").split())
+                    if header_values
+                    else ""
+                )
                 if looks_like_database_entry(first_header):
                     output.append(first_header)
                 for row_number, values in enumerate(iterator, start=2):
                     _validate_import_record(row_number, *values)
                     if values:
-                        first = str(values[0] or "").strip()
+                        first = " ".join(str(values[0] or "").split())
                         if first and (looks_like_database_entry(first) or not first.startswith("#")):
                             output.append(first)
             return "\n".join(output)
@@ -514,9 +539,11 @@ class QueueControllerMixin:
         QApplication font and normalizing the point size avoids that warning.
         """
         app = QApplication.instance()
-        font = QFont(app.font() if app else QFont("Segoe UI" if IS_WINDOWS else "Arial"))
-        if font.pointSize() <= 0:
-            font.setPointSize(10)
+        base = app.font() if app else None
+        family = base.family() if base and base.family() else ("Segoe UI" if IS_WINDOWS else "Arial")
+        point_size = base.pointSizeF() if base else 10.0
+        font = QFont(family)
+        font.setPointSizeF(point_size if point_size > 0 else 10.0)
         font.setBold(bold)
         return font
 
@@ -664,7 +691,7 @@ class QueueControllerMixin:
         if not dest:
             self.show_compact_message("Open destination", "Destination is unknown.", "info")
             return
-        path = Path(dest)
+        path = safe_expand_path(dest)
         if not path.is_dir():
             self.show_compact_message("Open destination", f"Folder does not exist:\n{path}", "warning")
             return
@@ -1373,6 +1400,8 @@ class QueueControllerMixin:
 
 __all__ = [
     "MAX_XLSX_ARCHIVE_MEMBERS",
+    "MAX_XLSX_CELLS",
+    "MAX_XLSX_COLUMNS",
     "MAX_XLSX_UNCOMPRESSED_BYTES",
     "QueueControllerMixin",
     "validate_xlsx_archive",

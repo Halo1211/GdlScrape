@@ -3,16 +3,19 @@
 import re
 from pathlib import Path
 
+from PyInstaller.utils.hooks import collect_submodules
+
 
 project_root = Path(SPECPATH).parent
 incompatible_icu = re.compile(r"^icu(?:uc|in|dt).*\.dll$", re.IGNORECASE)
+gallery_dl_hiddenimports = collect_submodules("gallery_dl.extractor")
 
 a = Analysis(
     [str(project_root / "gdlscrape.py")],
     pathex=[str(project_root)],
     binaries=[],
     datas=[(str(project_root / "gallery_dl_app" / "assets"), "gallery_dl_app/assets")],
-    hiddenimports=[],
+    hiddenimports=gallery_dl_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

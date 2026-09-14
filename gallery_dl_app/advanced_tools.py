@@ -1076,12 +1076,10 @@ Gunakan preset ini jika sering kena 429, timeout, temporary failure, atau koneks
 -------------------
 Range:
   --range 1-20
-  --post-range 1-10
-  --child-range 1-5
 
-Tanggal:
-  --date-after 2026-01-01
-  --date-before 2026-12-31
+Tanggal (key config khusus extractor; dukungan tergantung situs):
+  -o date-min=2026-01-01
+  -o date-max=2026-12-31
 
 Ukuran:
   --filesize-min 100k
@@ -1090,9 +1088,7 @@ Ukuran:
 Filter Python expression:
   --filter "image_width >= 1000 and extension in ('jpg', 'png')"
 
-Tag filter:
-  --tags-whitelist "highres,illustration"
-  --tags-blacklist "lowres,bad_quality"
+Tag/metadata situs memakai expression --filter setelah mengecek keyword dengan -K.
 
 7) Output audit dan debug
 -------------------------
@@ -1312,12 +1308,10 @@ Use this for 429, timeouts, temporary failures, or unstable networks.
 --------------------
 Ranges:
   --range 1-20
-  --post-range 1-10
-  --child-range 1-5
 
-Dates:
-  --date-after 2026-01-01
-  --date-before 2026-12-31
+Dates (extractor config keys; support is site-specific):
+  -o date-min=2026-01-01
+  -o date-max=2026-12-31
 
 File sizes:
   --filesize-min 100k
@@ -1326,9 +1320,7 @@ File sizes:
 Python expression filter:
   --filter "image_width >= 1000 and extension in ('jpg', 'png')"
 
-Tag filters:
-  --tags-whitelist "highres,illustration"
-  --tags-blacklist "lowres,bad_quality"
+Use --filter for site tag/metadata expressions after inspecting keywords with -K.
 
 7) Audit and debug output
 -------------------------
@@ -1791,7 +1783,14 @@ Debug:
                     cmd = validator.build_command(job)
                     if not cmd:
                         errors.append(f"#{i+1}: empty command")
-                    if not job.url.startswith(("http://", "https://")):
+                    # Full gallery-dl commands can source URLs from -i/-I/-x
+                    # or invoke extractor targets such as oauth:pixiv. They
+                    # were already source-validated by parse_line(). Apply the
+                    # HTTP shorthand warning only to non-command rows.
+                    if (
+                        not job.is_command
+                        and not job.url.startswith(("http://", "https://", "oauth:"))
+                    ):
                         errors.append(f"#{i+1}: no HTTP/HTTPS URL detected")
                     previews.append(f"#{i+1}: " + " ".join(quote_arg_for_preview(x) for x in redact_sensitive_argv(cmd)[:14]))
                 except Exception as exc:
@@ -1886,6 +1885,7 @@ Debug:
         if not paths:
             return
         texts: list[str] = []
+        loaded_paths: list[str] = []
         errors: list[str] = []
         for path in paths:
             try:
@@ -1898,6 +1898,7 @@ Debug:
                     text = read_text_safely(path)
                 if text.strip():
                     texts.append(text.strip())
+                    loaded_paths.append(path)
             except Exception as exc:
                 errors.append(f"{Path(path).name}: {exc}")
         if texts:
@@ -1914,13 +1915,16 @@ Debug:
                 event.acceptProposedAction()
                 return
             self.txt_commands.setPlainText(combined_text)
-            self.current_file = paths[0]
-            label = Path(paths[0]).name
-            if len(paths) > 1:
-                label += f" (+{len(paths) - 1} more)"
+            self.current_file = loaded_paths[0]
+            label = Path(loaded_paths[0]).name
+            if len(loaded_paths) > 1:
+                label += f" (+{len(loaded_paths) - 1} more)"
             self.lbl_loaded_file.setText(label)
-            self.lbl_loaded_file.setToolTip("\n".join(paths))
-            self.append_log(f"[input] dropped {len(paths)} file(s): {', '.join(Path(p).name for p in paths)}")
+            self.lbl_loaded_file.setToolTip("\n".join(loaded_paths))
+            self.append_log(
+                f"[input] dropped {len(loaded_paths)} file(s): "
+                f"{', '.join(Path(p).name for p in loaded_paths)}"
+            )
         if errors:
             self.show_compact_message("Drop failed", "\n".join(errors), "error")
         event.acceptProposedAction()

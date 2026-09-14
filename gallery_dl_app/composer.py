@@ -9,12 +9,15 @@ and config builders with overlapping fields.
 from __future__ import annotations
 
 import copy
+import dis
 import json
 import re
 import shutil
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import urlsplit
 
 from PySide6.QtCore import QPointF, QProcess, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF, QTextCursor
@@ -26,6 +29,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
     QGridLayout,
+    QHeaderView,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -37,6 +41,8 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QStackedWidget,
     QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -51,12 +57,13 @@ from .core import (
     is_sensitive_option_key,
     quote_arg_for_preview,
     read_text_safely,
+    redact_oauth_output,
     redact_sensitive_argv,
-    redact_sensitive_text,
     safe_bool,
     split_command,
     timestamp_slug,
     unique_path,
+    validate_cookies_txt,
 )
 
 
@@ -103,10 +110,465 @@ class ComposerState:
     extra_args: str = ""
 
 
+OAUTH_SITE_CHOICES = (
+    "pixiv",
+    "deviantart",
+    "flickr",
+    "reddit",
+    "smugmug",
+    "tumblr",
+    "mastodon",
+)
+
+
+@dataclass(frozen=True)
+class ConfigOptionSpec:
+    """One user-editable gallery-dl extractor option."""
+
+    key: str
+    value_type: str
+    default: object = None
+    group: str = "Extractor-specific"
+    description: str = "Extractor option discovered from the installed gallery-dl runtime."
+    choices: tuple[object, ...] = ()
+    sensitive: bool = False
+    scope: str = "site"
+
+
+_GENERAL_OPTION_DEFAULTS: dict[str, tuple[object, str, str]] = {
+    "filename": ("{filename}.{extension}", "Paths", "Filename format string."),
+    "directory": (["{category}"], "Paths", "Directory path segments as a JSON list."),
+    "base-directory": ("./gallery-dl/", "Paths", "Root directory for downloaded files."),
+    "path-restrict": ("auto", "Paths", "Characters to replace in generated path names."),
+    "path-replace": ("_", "Paths", "Replacement text for restricted path characters."),
+    "path-remove": ("\\u0000-\\u001f\\u007f", "Paths", "Characters removed from generated paths."),
+    "path-strip": ("auto", "Paths", "Characters stripped from the end of path segments."),
+    "path-convert": (None, "Paths", "Conversions applied to generated path segments."),
+    "path-extended": (True, "Paths", "Use Windows extended-length paths."),
+    "extension-map": ({}, "Paths", "Map file extensions to replacements."),
+    "archive": (None, "Archive", "SQLite download archive path."),
+    "archive-format": (None, "Archive", "Format string used as the archive item ID."),
+    "archive-prefix": (None, "Archive", "Prefix prepended to archive IDs."),
+    "archive-pragma": ([], "Archive", "SQLite PRAGMA statements as a JSON list."),
+    "archive-event": (["file"], "Archive", "Events that write entries to the archive."),
+    "archive-mode": ("file", "Archive", "Archive lookup/write mode."),
+    "archive-table": (None, "Archive", "Custom SQLite table name."),
+    "skip": (True, "Download", "Behavior for files already present or archived."),
+    "skip-filter": (None, "Download", "Condition controlling which skipped files count."),
+    "download": (True, "Download", "Enable or disable file downloads."),
+    "fallback": (True, "Download", "Use fallback URLs when the primary URL fails."),
+    "file-filter": (None, "Filters", "Condition applied to individual files."),
+    "file-range": (None, "Filters", "Range applied to extracted files."),
+    "file-unique": (False, "Filters", "Remove duplicate files."),
+    "post-filter": (None, "Filters", "Condition applied to posts."),
+    "post-range": (None, "Filters", "Range applied to posts."),
+    "child-filter": (None, "Filters", "Condition applied to child extractors."),
+    "child-range": (None, "Filters", "Range applied to child extractors."),
+    "child-unique": (False, "Filters", "Remove duplicate child extractor targets."),
+    "date-before": (None, "Filters", "Ignore entries newer than this date."),
+    "date-after": (None, "Filters", "Ignore entries older than this date."),
+    "blacklist": (None, "Filters", "Blocked child extractor categories."),
+    "whitelist": (None, "Filters", "Allowed child extractor categories."),
+    "tags-blacklist": (None, "Filters", "Blocked metadata tags."),
+    "tags-whitelist": (None, "Filters", "Allowed metadata tags."),
+    "user-agent": ("auto", "Network", "HTTP User-Agent header."),
+    "referer": (True, "Network", "Send extractor-derived Referer headers."),
+    "headers": ({}, "Network", "Additional HTTP headers as a JSON object."),
+    "browser": (None, "Network", "Browser/TLS impersonation preset."),
+    "proxy": (None, "Network", "HTTP/SOCKS proxy URL."),
+    "proxy-env": (True, "Network", "Read proxy settings from environment variables."),
+    "retries": (4, "Network", "Maximum retry count for failed requests."),
+    "retry-codes": ([], "Network", "Additional HTTP status codes to retry."),
+    "timeout": (30.0, "Network", "Request timeout in seconds."),
+    "verify": (True, "Network", "Verify TLS certificates."),
+    "truststore": (False, "Network", "Use the operating-system certificate store."),
+    "sleep": (0, "Rate limits", "Delay before each download."),
+    "sleep-skip": (0, "Rate limits", "Delay after skipping a file."),
+    "sleep-request": (0, "Rate limits", "Minimum interval between HTTP requests."),
+    "sleep-extractor": (0, "Rate limits", "Delay before starting an extractor."),
+    "sleep-retries": ("lin=1", "Rate limits", "Delay/backoff before retrying requests."),
+    "sleep-429": (60.0, "Rate limits", "Delay/backoff after HTTP 429."),
+    "parent": (False, "Hierarchy", "Mark the extractor as a parent."),
+    "parent-directory": (False, "Hierarchy", "Use the parent directory for child extractors."),
+    "parent-metadata": (False, "Hierarchy", "Forward parent metadata to child extractors."),
+    "parent-session": (False, "Hierarchy", "Share the HTTP session with child extractors."),
+    "parent-skip": (False, "Hierarchy", "Share skip counts with parent extractors."),
+    "keywords": ({}, "Metadata", "Custom metadata values as a JSON object."),
+    "keywords-default": (None, "Metadata", "Fallback for missing metadata fields."),
+    "metadata-extractor": ("_extr", "Metadata", "Field name for extractor metadata."),
+    "metadata-parent": ("_parent", "Metadata", "Field name for parent metadata."),
+    "metadata-path": ("_path", "Metadata", "Field name for path metadata."),
+    "metadata-url": ("_url", "Metadata", "Field name for URL metadata."),
+    "postprocessors": (None, "Post-processing", "Postprocessor definitions as JSON."),
+    "cookies": (None, "Authentication", "Cookie file, browser source, or cookie object."),
+    "cookies-update": (True, "Authentication", "Write refreshed cookies back to their source."),
+    "username": (None, "Authentication", "Login username."),
+    "password": (None, "Authentication", "Login password or API key for supported sites."),
+    "netrc": (False, "Authentication", "Enable .netrc authentication."),
+    "input": (True, "Behavior", "Allow interactive input prompts."),
+    "init": ("lazy", "Behavior", "When extractor internals are initialized."),
+}
+
+
+_SITE_OPTION_DEFAULTS: dict[str, dict[str, tuple[object, str, str, tuple[object, ...]]]] = {
+    "pixiv": {
+        "captions": (False, "Content", "Download artwork captions.", (True, False)),
+        "comments": (False, "Content", "Fetch comments.", (True, False)),
+        "include": (["artworks"], "Content", "Related profile sections to include.", ()),
+        "max-posts": (None, "Limits", "Maximum number of posts.", ()),
+        "metadata": (False, "Metadata", "Fetch extended metadata.", (True, False)),
+        "metadata-bookmark": (False, "Metadata", "Fetch bookmark metadata.", (True, False)),
+        "sanity": (True, "Behavior", "Enable Pixiv sanity checks.", (True, False)),
+        "tags": ("japanese", "Metadata", "Tag translation/language mode.", ("japanese", "translated")),
+        "ugoira": (True, "Content", "Download Ugoira or original frame archive.", (True, False, "original")),
+        "covers": (False, "Novels", "Download novel covers.", (True, False)),
+        "embeds": (False, "Novels", "Download embedded novel media.", (True, False)),
+        "full-series": (False, "Novels", "Download full novel series.", (True, False)),
+        "refresh-token": (None, "Authentication", "Pixiv OAuth refresh token.", ()),
+    },
+    "reddit": {
+        "api": ("auto", "API", "Choose auto, OAuth, or REST endpoints.", ("auto", "oauth", "rest")),
+        "comments": (0, "Content", "Approximate number of comments to fetch.", ()),
+        "morecomments": (False, "Content", "Resolve additional comment stubs.", (True, False)),
+        "embeds": (True, "Content", "Download media embedded in comments.", (True, False)),
+        "date-min": (0, "Filters", "Minimum submission date/timestamp.", ()),
+        "date-max": (253402210800, "Filters", "Maximum submission date/timestamp.", ()),
+        "id-min": (None, "Filters", "Minimum Reddit submission ID.", ()),
+        "id-max": (None, "Filters", "Maximum Reddit submission ID.", ()),
+        "limit": (None, "Limits", "Results per API query.", ()),
+        "pinned": (True, "Content", "Process pinned submissions.", (True, False)),
+        "previews": (True, "Content", "Use Reddit previews when child downloads fail.", (True, False)),
+        "recursion": (0, "Hierarchy", "Maximum recursive submission depth.", ()),
+        "selftext": (None, "Content", "Follow links in submission selftext.", (True, False, None)),
+        "videos": ("dash", "Content", "Video handling mode.", (True, False, "ytdl", "dash")),
+        "client-id": (None, "Authentication", "Reddit installed-app client ID.", ()),
+        "user-agent-oauth": (None, "Authentication", "OAuth API User-Agent identity.", ()),
+        "refresh-token": (None, "Authentication", "Reddit OAuth refresh token.", ()),
+    },
+    "kemono": {
+        "files": (None, "Content", "File types/generators to download.", ()),
+        "duplicates": (False, "Content", "Allow duplicate file hashes by type.", (True, False)),
+        "revisions": (False, "Content", "Download post revisions.", (True, False, "unique")),
+        "order-revisions": ("desc", "Ordering", "Revision order.", ("asc", "desc")),
+        "order-posts": (None, "Ordering", "Post order.", ("asc", "desc")),
+        "comments": (False, "Content", "Fetch comments.", (True, False)),
+        "dms": (False, "Content", "Fetch direct messages where supported.", (True, False)),
+        "announcements": (False, "Content", "Fetch creator announcements.", (True, False)),
+        "archives": (False, "Content", "Fetch archive-file metadata.", (True, False)),
+        "archives-format": ("list", "Content", "Archive metadata container format.", ("list", "dict", "object")),
+        "metadata": (True, "Metadata", "Fetch creator profile metadata.", (True, False)),
+        "original": (False, "Content", "Prefer original files over thumbnails.", (True, False)),
+        "max-posts": (None, "Limits", "Maximum number of posts.", ()),
+    },
+    "coomer": {},
+    "deviantart": {
+        "include": ("gallery", "Content", "Profile sections to include.", ()),
+        "folders": (False, "Content", "Process gallery folders.", (True, False)),
+        "journals": ("html", "Content", "Journal output mode.", (False, "html", "text")),
+        "mature": (True, "Content", "Include mature content when authorized.", (True, False)),
+        "original": (False, "Content", "Prefer original files.", (True, False)),
+        "quality": (100, "Content", "Image quality percentage.", ()),
+        "client-id": (None, "Authentication", "DeviantArt API client ID.", ()),
+        "client-secret": (None, "Authentication", "DeviantArt API client secret.", ()),
+        "refresh-token": (None, "Authentication", "OAuth refresh token.", ()),
+    },
+}
+_SITE_OPTION_DEFAULTS["coomer"] = _SITE_OPTION_DEFAULTS["kemono"]
+
+
+def _option_value_type(key: str, default: object) -> str:
+    if isinstance(default, bool):
+        return "boolean"
+    if isinstance(default, int):
+        return "integer"
+    if isinstance(default, float):
+        return "number"
+    if isinstance(default, (list, dict)):
+        return "json"
+    if key in {"include", "files", "formats", "format", "retry-codes", "postprocessors"}:
+        return "json"
+    return "text"
+
+
+@lru_cache(maxsize=512)
+def _runtime_site_options(category: str) -> tuple[tuple[str, object], ...]:
+    """Discover literal ``self.config('key', default)`` calls from bytecode."""
+    wanted = "kemono" if category == "coomer" else category
+    options: dict[str, object] = {}
+    try:
+        from gallery_dl import extractor
+
+        classes = [item for item in extractor.extractors() if item.category == wanted]
+        for cls in classes:
+            for base in cls.__mro__:
+                if not str(getattr(base, "__module__", "")).startswith("gallery_dl.extractor"):
+                    continue
+                for member in vars(base).values():
+                    code = getattr(member, "__code__", None)
+                    if code is None:
+                        continue
+                    awaiting_key = False
+                    current_key: str | None = None
+                    current_default: object = None
+                    for instruction in dis.get_instructions(code):
+                        if instruction.opname in {"LOAD_METHOD", "LOAD_ATTR"} and instruction.argval == "config":
+                            awaiting_key = True
+                            current_key = None
+                            current_default = None
+                        elif awaiting_key and instruction.opname == "LOAD_CONST" and isinstance(instruction.argval, str):
+                            current_key = instruction.argval
+                            awaiting_key = False
+                        elif current_key and instruction.opname == "LOAD_CONST" and isinstance(
+                            instruction.argval, (type(None), bool, int, float, str)
+                        ):
+                            current_default = instruction.argval
+                        elif current_key and instruction.opname.startswith("CALL"):
+                            options.setdefault(current_key, current_default)
+                            current_key = None
+                            current_default = None
+                        elif awaiting_key and instruction.opname.startswith("CALL"):
+                            awaiting_key = False
+    except Exception:
+        pass
+    return tuple(sorted(options.items()))
+
+
+def config_option_definitions(category: str = "") -> tuple[ConfigOptionSpec, ...]:
+    """Return general options plus details for one installed extractor."""
+    specs: dict[str, ConfigOptionSpec] = {}
+    for key, (default, group, description) in _GENERAL_OPTION_DEFAULTS.items():
+        specs[key] = ConfigOptionSpec(
+            key=key,
+            value_type=_option_value_type(key, default),
+            default=default,
+            group=group,
+            description=description,
+            sensitive=is_sensitive_option_key(key),
+            scope="general",
+        )
+    site = str(category or "").strip().lower()
+    if site:
+        for key, values in _SITE_OPTION_DEFAULTS.get(site, {}).items():
+            default, group, description, choices = values
+            specs[key] = ConfigOptionSpec(
+                key=key,
+                value_type=_option_value_type(key, default),
+                default=default,
+                group=group,
+                description=description,
+                choices=choices,
+                sensitive=is_sensitive_option_key(key),
+                scope="site",
+            )
+        for key, default in _runtime_site_options(site):
+            if key and key not in specs and re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]*", key):
+                specs[key] = ConfigOptionSpec(
+                    key=key,
+                    value_type=_option_value_type(key, default),
+                    default=default,
+                    sensitive=is_sensitive_option_key(key),
+                )
+    return tuple(sorted(specs.values(), key=lambda item: (item.group, item.key)))
+
+
+def composer_oauth_target(site: str, instance: str = "") -> str:
+    """Build a typo-proof OAuth target from guided Composer controls."""
+    category = str(site or "").strip().lower()
+    if category not in OAUTH_SITE_CHOICES:
+        raise ValueError("Choose a supported OAuth site from the list")
+    if category != "mastodon":
+        return f"oauth:{category}"
+    host = str(instance or "").strip()
+    if not host:
+        raise ValueError("Enter the Mastodon instance hostname or URL")
+    if any(char.isspace() for char in host):
+        raise ValueError("Enter a valid Mastodon instance hostname or URL")
+    is_url = "://" in host
+    candidate = urlsplit(host if is_url else f"//{host}")
+    try:
+        port = candidate.port
+    except ValueError as exc:
+        raise ValueError("Enter a valid Mastodon instance hostname or URL") from exc
+    hostname = candidate.hostname or ""
+    if (
+        (is_url and candidate.scheme.lower() not in {"http", "https"})
+        or candidate.username is not None
+        or candidate.password is not None
+        or candidate.query
+        or candidate.fragment
+        or (is_url and candidate.path not in {"", "/"})
+        or (not is_url and (candidate.path or candidate.scheme))
+        or not hostname
+        or port is not None and not 1 <= port <= 65535
+    ):
+        raise ValueError("Enter a valid Mastodon instance hostname or URL")
+    try:
+        ascii_hostname = hostname.encode("idna").decode("ascii")
+    except UnicodeError as exc:
+        raise ValueError("Enter a valid Mastodon instance hostname or URL") from exc
+    labels = ascii_hostname.rstrip(".").split(".")
+    if any(
+        not label
+        or len(label) > 63
+        or label.startswith("-")
+        or label.endswith("-")
+        or not re.fullmatch(r"[A-Za-z0-9-]+", label)
+        for label in labels
+    ):
+        raise ValueError("Enter a valid Mastodon instance hostname or URL")
+    return f"oauth:mastodon:{host}"
+
+
+def apply_config_editor_drafts(
+    data: dict,
+    *,
+    general_overrides: dict[str, object] | None = None,
+    site_overrides: dict[str, dict[str, object]] | None = None,
+    general_removals: set[str] | tuple[str, ...] = (),
+    site_removals: dict[str, set[str] | tuple[str, ...]] | None = None,
+) -> dict:
+    """Apply GUI config edits while preserving unrelated config sections."""
+    result = copy.deepcopy(data) if isinstance(data, dict) else {}
+    extractor = result.get("extractor")
+    if not isinstance(extractor, dict):
+        extractor = {}
+        result["extractor"] = extractor
+    for key in general_removals:
+        extractor.pop(str(key), None)
+    for key, value in (general_overrides or {}).items():
+        extractor[str(key)] = copy.deepcopy(value)
+    removals = site_removals or {}
+    categories = set(site_overrides or {}) | set(removals)
+    for category in categories:
+        current = extractor.get(category)
+        block = copy.deepcopy(current) if isinstance(current, dict) else {}
+        for key in removals.get(category, ()):
+            block.pop(str(key), None)
+        block = _merge_dict(block, (site_overrides or {}).get(category, {}))
+        if block:
+            extractor[category] = block
+        else:
+            extractor.pop(category, None)
+    return result
+
+
 def _add_value(parts: list[str], flag: str, value: str) -> None:
     value = str(value or "").strip()
     if value:
         parts.extend([flag, value])
+
+
+def site_archive_options(
+    path: str,
+    *,
+    duplicates: bool = False,
+    archive_format: str = "",
+) -> dict[str, object]:
+    """Build a per-extractor archive block from guided GUI values."""
+    archive = str(path or "").strip()
+    if not archive:
+        raise ValueError("Choose an archive SQLite database path")
+    result: dict[str, object] = {
+        "archive": archive,
+        "duplicates": bool(duplicates),
+    }
+    identifier = str(archive_format or "").strip().replace(r"\_", "_")
+    if identifier:
+        result["archive-format"] = identifier
+    return result
+
+
+def reddit_site_options(client_id: str, user_agent: str) -> dict[str, object]:
+    """Build the current gallery-dl Reddit OAuth application settings."""
+    result: dict[str, object] = {}
+    if value := str(client_id or "").strip():
+        result["client-id"] = value
+    if value := str(user_agent or "").strip():
+        result["user-agent-oauth"] = value
+    return result
+
+
+def pixiv_site_options(
+    *,
+    include: Iterable[str] = (),
+    embeds: bool = False,
+    covers: bool = False,
+    full_series: bool = False,
+    metadata: bool = False,
+    ugoira: bool | str = True,
+) -> dict[str, object]:
+    """Build guided Pixiv and Pixiv-novel settings accepted by gallery-dl."""
+    allowed = {
+        "artworks",
+        "avatar",
+        "background",
+        "favorite",
+        "novel-user",
+        "novel-bookmark",
+        "sketch",
+    }
+    selected: list[str] = []
+    for raw in include:
+        value = str(raw or "").strip().lower()
+        if value and value not in selected:
+            if value not in allowed:
+                raise ValueError(f"Unsupported Pixiv include value: {value}")
+            selected.append(value)
+    if isinstance(ugoira, str):
+        normalized_ugoira: bool | str
+        lowered = ugoira.strip().lower()
+        if lowered in {"true", "yes", "on"}:
+            normalized_ugoira = True
+        elif lowered in {"false", "no", "off"}:
+            normalized_ugoira = False
+        elif lowered == "original":
+            normalized_ugoira = "original"
+        else:
+            raise ValueError("Ugoira must be enabled, disabled, or original")
+    else:
+        normalized_ugoira = bool(ugoira)
+    result: dict[str, object] = {
+        "embeds": bool(embeds),
+        "covers": bool(covers),
+        "full-series": bool(full_series),
+        "metadata": bool(metadata),
+        "ugoira": normalized_ugoira,
+    }
+    result["include"] = selected
+    return result
+
+
+def parse_typed_config_value(text: str, value_type: str) -> object:
+    """Convert one advanced GUI field without executing user-provided text."""
+    kind = str(value_type or "text").strip().lower()
+    value = str(text or "")
+    if kind == "text":
+        return value
+    if kind == "boolean":
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes", "on"}:
+            return True
+        if lowered in {"false", "0", "no", "off"}:
+            return False
+        raise ValueError("Boolean value must be true or false")
+    if kind == "integer":
+        try:
+            return int(value.strip())
+        except ValueError as exc:
+            raise ValueError("Enter a valid integer") from exc
+    if kind == "number":
+        try:
+            return float(value.strip())
+        except ValueError as exc:
+            raise ValueError("Enter a valid number") from exc
+    if kind == "null":
+        return None
+    if kind == "json":
+        try:
+            return json.loads(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Enter valid JSON for a list or object") from exc
+    raise ValueError(f"Unsupported value type: {value_type}")
 
 
 def build_composer_argv(
@@ -157,8 +619,8 @@ def build_composer_argv(
             # before the dedicated --sleep-429 CLI flag was added.
             parts.extend(["-o", f"sleep-429={state.sleep_429}"])
         _add_value(parts, "--proxy", state.proxy)
-        # gallery-dl 1.29 exposes this as a long option only; ``-a`` is not a
-        # supported alias and makes argparse reject an otherwise valid job.
+        # Keep the descriptive long form in generated previews. The minimum
+        # supported gallery-dl also accepts ``-a`` as an alias.
         _add_value(parts, "--user-agent", state.user_agent)
         if state.windows_filenames:
             parts.extend(["-o", "path-restrict=windows", "-o", "path-strip=windows"])
@@ -457,34 +919,6 @@ def _read_json_config(path: str | None) -> tuple[dict, str | None]:
         return {}, str(exc)
 
 
-def validate_cookies_txt(path: str) -> tuple[bool, str]:
-    """Perform a lightweight Netscape cookies.txt format check."""
-
-    if not str(path or "").strip():
-        return False, "No cookies.txt file selected."
-    target = Path(path).expanduser()
-    if not target.exists() or not target.is_file():
-        return False, "cookies.txt file does not exist."
-    try:
-        # Cookie exports can grow very large. Read only the validation prefix
-        # instead of materializing the whole file on the GUI thread.
-        with target.open("rb") as handle:
-            text = handle.read(512 * 1024).decode("utf-8-sig", errors="replace")
-    except Exception as exc:
-        return False, f"Could not read cookies.txt: {exc}"
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        if line.startswith("#HttpOnly_"):
-            line = line[len("#HttpOnly_"):]
-        elif line.startswith("#"):
-            continue
-        if len(line.split("\t")) >= 7:
-            return True, "Netscape cookies.txt format detected."
-    return False, "No Netscape-format cookie rows were found (expected 7 tab-separated columns)."
-
-
 class ComposerFlowchart(QWidget):
     """Compact, theme-aware overview of the Composer workflow."""
 
@@ -681,6 +1115,25 @@ class ComposerMixin:
         tabs = QTabWidget()
         root.addWidget(tabs, 1)
         definitions = self.gallery_dl_site_preset_definitions()
+        definition_names = {
+            str(item.get("key") or "").strip().lower(): str(item.get("name") or "").strip()
+            for item in definitions
+            if str(item.get("key") or "").strip()
+        }
+        runtime_categories: set[str] = set()
+        try:
+            from gallery_dl import extractor
+
+            runtime_categories.update(
+                str(item.category).strip().lower()
+                for item in extractor.extractors()
+                if str(getattr(item, "category", "")).strip()
+            )
+        except Exception:
+            pass
+        # Coomer changes category dynamically after URL matching, so it is not
+        # represented by the class-level category returned above.
+        site_catalog = sorted(runtime_categories | set(definition_names) | {"coomer"})
         gui_browser = self.combo_cookies.currentText().strip().lower()
 
         # Built-in guide --------------------------------------------------------------
@@ -1138,12 +1591,13 @@ class ComposerMixin:
         auth_choice_l.setVerticalSpacing(8)
         auth_site = QComboBox()
         auth_site.setObjectName("authSiteCombo")
-        auth_site.setEditable(True)
+        auth_site.setEditable(False)
         auth_site.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         auth_site.setMinimumContentsLength(18)
         auth_site.addItem(tr("All sites (global)", "Semua situs (global)"), "")
-        for item in definitions:
-            auth_site.addItem(f"{item['name']} ({item['key']})", str(item["key"]))
+        for category in site_catalog:
+            friendly = definition_names.get(category)
+            auth_site.addItem(f"{friendly} ({category})" if friendly else category, category)
         auth_site.setToolTip(tr(
             "Select a specific extractor to keep login data scoped to that site. Global is useful only for one shared browser-cookie source.",
             "Pilih extractor tertentu agar data login hanya berlaku untuk situs itu. Global sebaiknya hanya untuk satu sumber cookies browser bersama.",
@@ -1328,17 +1782,34 @@ class ComposerMixin:
         oauth_l.setHorizontalSpacing(10)
         oauth_l.setVerticalSpacing(8)
         oauth_site = QComboBox()
-        oauth_site.setEditable(True)
-        oauth_site.addItems(["pixiv", "deviantart", "flickr", "reddit", "smugmug", "tumblr", "mastodon"])
+        oauth_site.setObjectName("oauthSiteCombo")
+        oauth_site.setEditable(False)
+        for category in OAUTH_SITE_CHOICES:
+            oauth_site.addItem(category, category)
         oauth_site.setToolTip(tr(
-            "OAuth target used as gallery-dl oauth:<site>. Mastodon can include an instance, for example mastodon:https://mastodon.social/.",
-            "Target OAuth yang dipakai sebagai gallery-dl oauth:<situs>. Mastodon dapat menyertakan instance, misalnya mastodon:https://mastodon.social/.",
+            "Choose a supported OAuth extractor. Free typing is disabled to prevent site-name mistakes.",
+            "Pilih extractor OAuth yang didukung. Pengetikan bebas dinonaktifkan agar nama situs tidak salah.",
         ))
+        oauth_instance = QLineEdit()
+        oauth_instance.setObjectName("oauthMastodonInstance")
+        oauth_instance.setPlaceholderText(tr(
+            "Mastodon only: instance hostname or URL",
+            "Khusus Mastodon: hostname atau URL instance",
+        ))
+        oauth_instance.setEnabled(False)
         oauth_start = QPushButton(tr("Start OAuth", "Mulai OAuth"))
         oauth_start.setObjectName("primary")
         oauth_stop = QPushButton(tr("Stop", "Hentikan"))
         oauth_stop.setEnabled(False)
         oauth_copy = QPushButton(tr("Copy command", "Salin command"))
+        oauth_response = QLineEdit()
+        oauth_response.setEchoMode(QLineEdit.Password)
+        oauth_response.setPlaceholderText(tr(
+            "Pixiv only: paste code or callback URL",
+            "Khusus Pixiv: tempel code atau URL callback",
+        ))
+        oauth_send = QPushButton(tr("Send Pixiv code", "Kirim code Pixiv"))
+        oauth_send.setEnabled(False)
         oauth_status = QPlainTextEdit()
         oauth_status.setReadOnly(True)
         oauth_status.setMinimumHeight(150)
@@ -1353,14 +1824,19 @@ class ComposerMixin:
         oauth_buttons.addWidget(oauth_stop)
         oauth_buttons.addWidget(oauth_copy)
         oauth_l.addLayout(oauth_buttons, 0, 2, 1, 2)
-        oauth_l.addWidget(oauth_status, 1, 0, 1, 4)
+        oauth_l.addWidget(QLabel(tr("Mastodon instance", "Instance Mastodon")), 1, 0)
+        oauth_l.addWidget(oauth_instance, 1, 1, 1, 3)
+        oauth_l.addWidget(QLabel(tr("Authorization response", "Respons otorisasi")), 2, 0)
+        oauth_l.addWidget(oauth_response, 2, 1, 1, 2)
+        oauth_l.addWidget(oauth_send, 2, 3)
+        oauth_l.addWidget(oauth_status, 3, 0, 1, 4)
         oauth_note = QLabel(tr(
             "OAuth does not use the username/password fields above. gallery-dl opens the site's official authorization page and normally stores received tokens in its cache. Never share token output.",
             "OAuth tidak memakai field username/password di atas. gallery-dl membuka halaman otorisasi resmi situs dan biasanya menyimpan token yang diterima ke cache. Jangan pernah membagikan output token.",
         ))
         oauth_note.setObjectName("subtle")
         oauth_note.setWordWrap(True)
-        oauth_l.addWidget(oauth_note, 2, 0, 1, 4)
+        oauth_l.addWidget(oauth_note, 4, 0, 1, 4)
         oauth_l.setColumnStretch(1, 1)
         auth_stack.addWidget(oauth_panel)
 
@@ -1398,9 +1874,16 @@ class ComposerMixin:
         site_search.setToolTip(tr("Filter the preset list by site name or extractor category.", "Saring daftar preset berdasarkan nama situs atau category extractor."))
         select_common = QPushButton(tr("Common", "Umum"))
         select_none = QPushButton(tr("Clear", "Bersihkan"))
+        site_config_button = QPushButton(tr("Site Config Studio…", "Studio Config Situs…"))
+        site_config_button.setObjectName("siteConfigStudioButton")
+        site_config_button.setToolTip(tr(
+            "Edit per-site archive databases, Reddit OAuth app settings, Pixiv options, and typed advanced options.",
+            "Atur database archive per situs, aplikasi OAuth Reddit, opsi Pixiv, dan opsi lanjutan bertipe.",
+        ))
         site_tools.addWidget(site_search, 1)
         site_tools.addWidget(select_common)
         site_tools.addWidget(select_none)
+        site_tools.addWidget(site_config_button)
         sites_l.addLayout(site_tools)
         site_scroll = QScrollArea()
         site_scroll.setWidgetResizable(True)
@@ -1450,6 +1933,13 @@ class ComposerMixin:
         tabs.addTab(preview_page, tr("Preview", "Pratinjau"))
 
         existing_config, config_error = _read_json_config(self.config_path)
+        # Only draft values created in Site Config Studio live here. They are
+        # merged recursively into the existing config and are not persisted
+        # until the user explicitly saves from the main Composer dialog.
+        general_overrides: dict[str, object] = {}
+        site_overrides: dict[str, dict[str, object]] = {}
+        general_removals: set[str] = set()
+        site_removals: dict[str, set[str]] = {}
 
         def apply_loaded_defaults() -> None:
             values = config_defaults(existing_config)
@@ -1497,6 +1987,33 @@ class ComposerMixin:
                 return str(auth_site.itemData(index) or "").strip().lower()
             match = re.search(r"\(([^()]+)\)\s*$", site_text)
             return match.group(1) if match else re.sub(r"[^a-z0-9_.-]+", "", site_text)
+
+        def populate_auth_sites(method: str, preserve: str = "") -> None:
+            if method == "oauth":
+                categories = list(OAUTH_SITE_CHOICES)
+                include_global = False
+            elif method == "credentials":
+                categories = site_catalog
+                include_global = False
+            else:
+                categories = site_catalog
+                include_global = True
+            wanted = str(preserve or selected_auth_category()).strip().lower()
+            auth_site.blockSignals(True)
+            try:
+                auth_site.clear()
+                if include_global:
+                    auth_site.addItem(tr("All sites (global)", "Semua situs (global)"), "")
+                for category in categories:
+                    friendly = definition_names.get(category)
+                    auth_site.addItem(
+                        f"{friendly} ({category})" if friendly else category,
+                        category,
+                    )
+                index = auth_site.findData(wanted)
+                auth_site.setCurrentIndex(index if index >= 0 else 0)
+            finally:
+                auth_site.blockSignals(False)
 
         def current_state() -> ComposerState:
             auth_kind = str(auth_method.currentData())
@@ -1553,15 +2070,24 @@ class ComposerMixin:
                 state.cookies_browser,
                 state.cookies_file,
             )
-            blocks.update(self._custom_site_keys_to_config(custom_sites.text()))
+            for category, block in self._custom_site_keys_to_config(custom_sites.text()).items():
+                current = blocks.get(category, {})
+                blocks[category] = _merge_dict(current, block)
             return blocks
 
         def proposed_config() -> dict:
             state = current_state()
-            return build_composer_config(
+            data = build_composer_config(
                 state,
                 site_blocks=selected_site_blocks(state),
                 existing=existing_config,
+            )
+            return apply_config_editor_drafts(
+                data,
+                general_overrides=general_overrides,
+                site_overrides=site_overrides,
+                general_removals=general_removals,
+                site_removals=site_removals,
             )
 
         def command_lines(*, redact: bool = False) -> list[str]:
@@ -1611,6 +2137,810 @@ class ComposerMixin:
                 issues.append(tr("The active config could not be merged: ", "Config aktif tidak dapat digabung: ") + config_error)
             warnings.setText("\n".join("! " + issue for issue in issues))
 
+        def open_site_config_studio() -> None:  # noqa: C901 - guided tabbed editor
+            studio = QDialog(dlg)
+            studio.setObjectName("siteConfigStudio")
+            studio.setWindowTitle(tr("Site Config Studio", "Studio Config Situs"))
+            studio.resize(1040, 760)
+            studio.setMinimumSize(860, 640)
+            studio_l = QVBoxLayout(studio)
+            studio_intro = QLabel(tr(
+                "Build extractor-specific JSON without typing braces or option names. Changes remain a draft until you use Save Defaults in the Composer.",
+                "Buat JSON khusus extractor tanpa mengetik kurung atau nama opsi. Perubahan tetap berupa draft sampai Anda menekan Simpan Default di Composer.",
+            ))
+            studio_intro.setWordWrap(True)
+            studio_intro.setObjectName("subtle")
+            studio_l.addWidget(studio_intro)
+
+            studio_tabs = QTabWidget()
+            studio_tabs.setObjectName("siteConfigTabs")
+            studio_l.addWidget(studio_tabs, 1)
+            existing_extractor = (
+                existing_config.get("extractor", {})
+                if isinstance(existing_config, dict)
+                else {}
+            )
+            if not isinstance(existing_extractor, dict):
+                existing_extractor = {}
+            existing_site_names = {
+                str(key).strip().lower()
+                for key, value in existing_extractor.items()
+                if isinstance(value, dict) and str(key).strip().lower() not in _GENERAL_OPTION_DEFAULTS
+            }
+            site_names = sorted(
+                set(site_catalog)
+                | {str(item.get("key") or "").strip().lower() for item in definitions}
+                | existing_site_names
+                | set(site_overrides)
+                | {"kemono", "coomer", "reddit", "pixiv"}
+                - {""}
+            )
+
+            def site_picker(object_name: str, default: str) -> QComboBox:
+                picker = QComboBox()
+                picker.setObjectName(object_name)
+                picker.setEditable(False)
+                picker.setInsertPolicy(QComboBox.NoInsert)
+                picker.setMaxVisibleItems(24)
+                picker.addItems(site_names)
+                picker.setCurrentText(default)
+                if picker.completer() is not None:
+                    picker.completer().setCaseSensitivity(Qt.CaseInsensitive)
+                    picker.completer().setFilterMode(Qt.MatchContains)
+                return picker
+
+            def normalized_site(picker: QComboBox) -> str:
+                category = picker.currentText().strip().lower()
+                if category not in site_names:
+                    raise ValueError(tr(
+                        "Choose an installed gallery-dl extractor from the list.",
+                        "Pilih extractor gallery-dl terpasang dari daftar.",
+                    ))
+                return category
+
+            def merge_override(category: str, block: dict[str, object]) -> None:
+                site_overrides[category] = _merge_dict(site_overrides.get(category, {}), block)
+                removed = site_removals.get(category)
+                if removed:
+                    removed.difference_update(block)
+                    if not removed:
+                        site_removals.pop(category, None)
+                scope.setCurrentIndex(scope.findData("config"))
+                refresh_preview()
+                update_studio_preview()
+
+            # Complete general/per-site option editor -------------------------
+            all_options_page = QWidget()
+            all_options_l = QVBoxLayout(all_options_page)
+            all_options_l.setContentsMargins(10, 10, 10, 10)
+            option_scope_row = QGridLayout()
+            config_scope = QComboBox()
+            config_scope.setObjectName("configScopeCombo")
+            config_scope.addItem(tr("General defaults — all sites", "Default umum — semua situs"), "general")
+            config_scope.addItem(tr("Per-site override", "Override per situs"), "site")
+            config_site = site_picker("configEditorSiteCombo", "pixiv")
+            config_option_search = QLineEdit()
+            config_option_search.setObjectName("configOptionSearch")
+            config_option_search.setPlaceholderText(tr(
+                "Search option name, group, or description",
+                "Cari nama opsi, grup, atau deskripsi",
+            ))
+            option_scope_row.addWidget(QLabel(tr("Level", "Tingkat")), 0, 0)
+            option_scope_row.addWidget(config_scope, 0, 1)
+            option_scope_row.addWidget(QLabel(tr("Site", "Situs")), 0, 2)
+            option_scope_row.addWidget(config_site, 0, 3)
+            option_scope_row.addWidget(config_option_search, 1, 0, 1, 4)
+            option_scope_row.setColumnStretch(1, 1)
+            option_scope_row.setColumnStretch(3, 1)
+            all_options_l.addLayout(option_scope_row)
+
+            config_option_table = QTableWidget(0, 6)
+            config_option_table.setObjectName("configOptionTable")
+            config_option_table.setHorizontalHeaderLabels([
+                tr("Option", "Opsi"),
+                tr("Current value", "Nilai saat ini"),
+                tr("Source", "Sumber"),
+                tr("Default", "Default"),
+                tr("Type", "Tipe"),
+                tr("Group", "Grup"),
+            ])
+            config_option_table.setSelectionBehavior(QTableWidget.SelectRows)
+            config_option_table.setSelectionMode(QTableWidget.SingleSelection)
+            config_option_table.setEditTriggers(QTableWidget.NoEditTriggers)
+            config_option_table.verticalHeader().setVisible(False)
+            option_header = config_option_table.horizontalHeader()
+            option_header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+            option_header.setSectionResizeMode(1, QHeaderView.Stretch)
+            option_header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+            option_header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+            option_header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+            option_header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+            all_options_l.addWidget(config_option_table, 1)
+
+            option_description = QLabel()
+            option_description.setObjectName("configOptionDescription")
+            option_description.setWordWrap(True)
+            option_description.setMinimumHeight(38)
+            all_options_l.addWidget(option_description)
+            option_editor = QGridLayout()
+            config_option_key = QComboBox()
+            config_option_key.setObjectName("configOptionKey")
+            config_option_key.setEditable(False)
+            config_option_type = QComboBox()
+            config_option_type.setObjectName("configOptionValueType")
+            for label, value in (
+                (tr("Text", "Teks"), "text"),
+                (tr("Boolean", "Boolean"), "boolean"),
+                (tr("Integer", "Integer"), "integer"),
+                (tr("Number", "Angka"), "number"),
+                ("JSON", "json"),
+                ("Null", "null"),
+            ):
+                config_option_type.addItem(label, value)
+            config_option_value = QComboBox()
+            config_option_value.setObjectName("configOptionValue")
+            config_option_value.setEditable(True)
+            config_option_value.setInsertPolicy(QComboBox.NoInsert)
+            config_option_value.lineEdit().setPlaceholderText(tr(
+                "Choose or enter a typed value",
+                "Pilih atau masukkan nilai sesuai tipe",
+            ))
+            config_option_show = QCheckBox(tr("Show sensitive value", "Tampilkan nilai sensitif"))
+            config_option_ack = QCheckBox(tr(
+                "Allow plain-text storage for this sensitive value",
+                "Izinkan penyimpanan teks biasa untuk nilai sensitif ini",
+            ))
+            config_option_apply = QPushButton(tr("Set value", "Atur nilai"))
+            config_option_apply.setObjectName("setConfigOption")
+            config_option_remove = QPushButton(tr("Remove / inherit", "Hapus / warisi"))
+            config_option_remove.setObjectName("removeConfigOption")
+            option_editor.addWidget(QLabel(tr("Option", "Opsi")), 0, 0)
+            option_editor.addWidget(config_option_key, 0, 1)
+            option_editor.addWidget(config_option_type, 0, 2)
+            option_editor.addWidget(QLabel(tr("Value", "Nilai")), 1, 0)
+            option_editor.addWidget(config_option_value, 1, 1, 1, 2)
+            option_editor.addWidget(config_option_show, 2, 1)
+            option_editor.addWidget(config_option_ack, 2, 2)
+            option_editor.addWidget(config_option_apply, 3, 1)
+            option_editor.addWidget(config_option_remove, 3, 2)
+            option_editor.setColumnStretch(1, 1)
+            all_options_l.addLayout(option_editor)
+            inheritance_note = QLabel(tr(
+                "General values apply to every extractor. A per-site value overrides General only for that site. Remove / inherit deletes the site override so the General/default value is used again.",
+                "Nilai Umum berlaku untuk semua extractor. Nilai per situs menimpa Umum hanya untuk situs tersebut. Hapus / warisi menghapus override situs sehingga nilai Umum/default dipakai lagi.",
+            ))
+            inheritance_note.setObjectName("subtle")
+            inheritance_note.setWordWrap(True)
+            all_options_l.addWidget(inheritance_note)
+            studio_tabs.addTab(all_options_page, tr("All Options", "Semua Opsi"))
+
+            # Archive database -------------------------------------------------
+            archive_page = QWidget()
+            archive_l = QGridLayout(archive_page)
+            archive_l.setContentsMargins(12, 12, 12, 12)
+            archive_site = site_picker("siteArchiveCategory", "kemono")
+            site_archive_path = QLineEdit()
+            site_archive_path.setObjectName("siteArchivePath")
+            site_archive_path.setPlaceholderText("E:/RIPS/Database/kemono.sqlite3")
+            site_archive_browse = QPushButton(tr("Browse…", "Pilih…"))
+            site_duplicates = QCheckBox(tr(
+                "Allow duplicate archive IDs (duplicates: true)",
+                "Izinkan ID archive duplikat (duplicates: true)",
+            ))
+            site_archive_format = QLineEdit("{service}{user}{id}_{num}")
+            site_archive_format.setObjectName("siteArchiveFormat")
+            archive_apply = QPushButton(tr("Apply archive settings", "Terapkan pengaturan archive"))
+            archive_apply.setObjectName("applySiteArchive")
+            archive_load = QPushButton(tr("Load current", "Muat saat ini"))
+            archive_note = QLabel(tr(
+                "One SQLite file per site is supported. With duplicates unchecked, JSON writes \"duplicates\": false. The GUI also normalizes the copied \\_ example to _. Existing unknown site options are preserved.",
+                "Satu file SQLite per situs didukung. Saat duplikat tidak dicentang, JSON menulis \"duplicates\": false. GUI juga menormalkan contoh \\_ yang disalin menjadi _. Opsi situs lain tetap dipertahankan.",
+            ))
+            archive_note.setWordWrap(True)
+            archive_note.setObjectName("subtle")
+            archive_l.addWidget(QLabel(tr("Site / extractor", "Situs / extractor")), 0, 0)
+            archive_l.addWidget(archive_site, 0, 1, 1, 2)
+            archive_l.addWidget(QLabel(tr("Archive database", "Database archive")), 1, 0)
+            archive_l.addWidget(site_archive_path, 1, 1)
+            archive_l.addWidget(site_archive_browse, 1, 2)
+            archive_l.addWidget(QLabel("archive-format"), 2, 0)
+            archive_l.addWidget(site_archive_format, 2, 1, 1, 2)
+            archive_l.addWidget(site_duplicates, 3, 1, 1, 2)
+            archive_l.addWidget(archive_note, 4, 0, 1, 3)
+            archive_buttons = QHBoxLayout()
+            archive_buttons.addWidget(archive_load)
+            archive_buttons.addWidget(archive_apply)
+            archive_buttons.addStretch(1)
+            archive_l.addLayout(archive_buttons, 5, 0, 1, 3)
+            archive_l.setColumnStretch(1, 1)
+            archive_l.setRowStretch(6, 1)
+            studio_tabs.addTab(archive_page, tr("Archive", "Archive"))
+
+            # Reddit -----------------------------------------------------------
+            reddit_page = QWidget()
+            reddit_l = QGridLayout(reddit_page)
+            reddit_l.setContentsMargins(12, 12, 12, 12)
+            reddit_client_id = QLineEdit()
+            reddit_client_id.setObjectName("redditClientId")
+            reddit_client_id.setEchoMode(QLineEdit.Password)
+            reddit_client_id.setPlaceholderText(tr(
+                "Reddit application client ID (leave blank to keep existing)",
+                "Client ID aplikasi Reddit (kosongkan untuk mempertahankan nilai lama)",
+            ))
+            reddit_user_agent = QLineEdit()
+            reddit_user_agent.setObjectName("redditOAuthUserAgent")
+            reddit_user_agent.setPlaceholderText("Python:Downloader:v1.01 (by /u/your_username)")
+            reddit_show = QCheckBox(tr("Show client ID", "Tampilkan client ID"))
+            reddit_apply = QPushButton(tr("Apply Reddit settings", "Terapkan pengaturan Reddit"))
+            reddit_apply.setObjectName("applyRedditSettings")
+            reddit_note = QLabel(tr(
+                "Current gallery-dl uses client-id and user-agent-oauth for Reddit OAuth. The older plain user-agent key is not generated. After changing client-id, clear Reddit's cache from Accounts before reconnecting OAuth.",
+                "gallery-dl saat ini memakai client-id dan user-agent-oauth untuk OAuth Reddit. Key user-agent lama tidak dibuat. Setelah mengubah client-id, bersihkan cache Reddit dari Accounts sebelum menyambungkan OAuth lagi.",
+            ))
+            reddit_note.setWordWrap(True)
+            reddit_note.setObjectName("subtle")
+            reddit_l.addWidget(QLabel("client-id"), 0, 0)
+            reddit_l.addWidget(reddit_client_id, 0, 1)
+            reddit_l.addWidget(reddit_show, 1, 1)
+            reddit_l.addWidget(QLabel("user-agent-oauth"), 2, 0)
+            reddit_l.addWidget(reddit_user_agent, 2, 1)
+            reddit_l.addWidget(reddit_note, 3, 0, 1, 2)
+            reddit_l.addWidget(reddit_apply, 4, 0, 1, 2, Qt.AlignLeft)
+            reddit_l.setColumnStretch(1, 1)
+            reddit_l.setRowStretch(5, 1)
+            studio_tabs.addTab(reddit_page, "Reddit")
+
+            # Pixiv ------------------------------------------------------------
+            pixiv_scroll = QScrollArea()
+            pixiv_scroll.setWidgetResizable(True)
+            pixiv_scroll.setFrameShape(QFrame.NoFrame)
+            pixiv_page = QWidget()
+            pixiv_l = QVBoxLayout(pixiv_page)
+            pixiv_l.setContentsMargins(12, 12, 12, 12)
+            pixiv_scroll.setWidget(pixiv_page)
+            include_label = QLabel(tr("Include", "Sertakan"))
+            include_label.setObjectName("fieldLabel")
+            pixiv_l.addWidget(include_label)
+            pixiv_include_grid = QGridLayout()
+            pixiv_include: dict[str, QCheckBox] = {}
+            for index, value in enumerate((
+                "artworks", "avatar", "background", "favorite",
+                "novel-user", "novel-bookmark", "sketch",
+            )):
+                checkbox = QCheckBox(value)
+                pixiv_include[value] = checkbox
+                pixiv_include_grid.addWidget(checkbox, index // 3, index % 3)
+            pixiv_l.addLayout(pixiv_include_grid)
+            pixiv_flags = QGridLayout()
+            pixiv_embeds = QCheckBox("embeds")
+            pixiv_covers = QCheckBox("covers")
+            pixiv_full_series = QCheckBox("full-series")
+            pixiv_metadata = QCheckBox("metadata")
+            for index, checkbox in enumerate((
+                pixiv_embeds, pixiv_covers, pixiv_full_series, pixiv_metadata,
+            )):
+                pixiv_flags.addWidget(checkbox, index // 2, index % 2)
+            pixiv_l.addLayout(pixiv_flags)
+            pixiv_ugoira_row = QHBoxLayout()
+            pixiv_ugoira_row.addWidget(QLabel("ugoira"))
+            pixiv_ugoira = QComboBox()
+            pixiv_ugoira.setObjectName("pixivUgoira")
+            pixiv_ugoira.addItem(tr("Enabled", "Aktif"), True)
+            pixiv_ugoira.addItem(tr("Disabled", "Nonaktif"), False)
+            pixiv_ugoira.addItem(tr("Original frames", "Frame asli"), "original")
+            pixiv_ugoira.setCurrentIndex(pixiv_ugoira.findData("original"))
+            pixiv_ugoira_row.addWidget(pixiv_ugoira, 1)
+            pixiv_l.addLayout(pixiv_ugoira_row)
+            pixiv_secret_note = QLabel(tr(
+                "Recommended: connect Pixiv through Accounts > OAuth so tokens stay in its private cache. The fields below exist only for importing a legacy manual config and will be stored as plain text in config.json.",
+                "Disarankan: sambungkan Pixiv melalui Accounts > OAuth agar token tetap berada di cache privat. Field di bawah hanya untuk mengimpor config manual lama dan akan tersimpan sebagai teks biasa di config.json.",
+            ))
+            pixiv_secret_note.setWordWrap(True)
+            pixiv_secret_note.setObjectName("subtle")
+            pixiv_l.addWidget(pixiv_secret_note)
+            pixiv_secret_grid = QGridLayout()
+            pixiv_refresh_token = QLineEdit()
+            pixiv_refresh_token.setObjectName("pixivRefreshToken")
+            pixiv_refresh_token.setEchoMode(QLineEdit.Password)
+            pixiv_refresh_token.setPlaceholderText(tr("Optional; blank keeps existing", "Opsional; kosong mempertahankan nilai lama"))
+            pixiv_phpsessid = QLineEdit()
+            pixiv_phpsessid.setObjectName("pixivPhpsessid")
+            pixiv_phpsessid.setEchoMode(QLineEdit.Password)
+            pixiv_phpsessid.setPlaceholderText(tr("Optional; blank keeps existing", "Opsional; kosong mempertahankan nilai lama"))
+            pixiv_show = QCheckBox(tr("Show manual credentials", "Tampilkan credential manual"))
+            pixiv_secret_ack = QCheckBox(tr(
+                "I understand new values are saved in plain text",
+                "Saya memahami nilai baru disimpan sebagai teks biasa",
+            ))
+            pixiv_secret_grid.addWidget(QLabel("refresh-token"), 0, 0)
+            pixiv_secret_grid.addWidget(pixiv_refresh_token, 0, 1)
+            pixiv_secret_grid.addWidget(QLabel("cookies.PHPSESSID"), 1, 0)
+            pixiv_secret_grid.addWidget(pixiv_phpsessid, 1, 1)
+            pixiv_secret_grid.addWidget(pixiv_show, 2, 1)
+            pixiv_secret_grid.addWidget(pixiv_secret_ack, 3, 1)
+            pixiv_secret_grid.setColumnStretch(1, 1)
+            pixiv_l.addLayout(pixiv_secret_grid)
+            pixiv_apply = QPushButton(tr("Apply Pixiv settings", "Terapkan pengaturan Pixiv"))
+            pixiv_apply.setObjectName("applyPixivSettings")
+            pixiv_l.addWidget(pixiv_apply, 0, Qt.AlignLeft)
+            pixiv_l.addStretch(1)
+            studio_tabs.addTab(pixiv_scroll, "Pixiv")
+
+            # Typed advanced option -------------------------------------------
+            advanced_page = QWidget()
+            advanced_l = QGridLayout(advanced_page)
+            advanced_l.setContentsMargins(12, 12, 12, 12)
+            advanced_site = site_picker("advancedSiteCategory", "pixiv")
+            advanced_key = QLineEdit()
+            advanced_key.setObjectName("advancedSiteOptionKey")
+            advanced_key.setPlaceholderText("option-name")
+            advanced_type = QComboBox()
+            advanced_type.setObjectName("advancedSiteOptionType")
+            for label, value in (
+                (tr("Text", "Teks"), "text"),
+                (tr("Boolean", "Boolean"), "boolean"),
+                (tr("Integer", "Integer"), "integer"),
+                (tr("Number", "Angka"), "number"),
+                ("JSON", "json"),
+                ("Null", "null"),
+            ):
+                advanced_type.addItem(label, value)
+            advanced_value = QLineEdit()
+            advanced_value.setObjectName("advancedSiteOptionValue")
+            advanced_value.setPlaceholderText(tr("Typed value", "Nilai sesuai tipe"))
+            advanced_show = QCheckBox(tr("Show sensitive value", "Tampilkan nilai sensitif"))
+            advanced_ack = QCheckBox(tr(
+                "Allow plain-text storage when the option is sensitive",
+                "Izinkan penyimpanan teks biasa jika opsi bersifat sensitif",
+            ))
+            advanced_apply = QPushButton(tr("Apply typed option", "Terapkan opsi bertipe"))
+            advanced_apply.setObjectName("applyAdvancedSiteOption")
+            advanced_note = QLabel(tr(
+                "Use the exact option name from the official gallery-dl documentation. JSON accepts lists or objects and is parsed as data only; it is never executed.",
+                "Gunakan nama opsi yang tepat dari dokumentasi resmi gallery-dl. JSON menerima list atau object dan hanya diparsing sebagai data; nilainya tidak pernah dieksekusi.",
+            ))
+            advanced_note.setWordWrap(True)
+            advanced_note.setObjectName("subtle")
+            advanced_l.addWidget(QLabel(tr("Site / extractor", "Situs / extractor")), 0, 0)
+            advanced_l.addWidget(advanced_site, 0, 1, 1, 2)
+            advanced_l.addWidget(QLabel(tr("Option key", "Nama opsi")), 1, 0)
+            advanced_l.addWidget(advanced_key, 1, 1)
+            advanced_l.addWidget(advanced_type, 1, 2)
+            advanced_l.addWidget(QLabel(tr("Value", "Nilai")), 2, 0)
+            advanced_l.addWidget(advanced_value, 2, 1, 1, 2)
+            advanced_l.addWidget(advanced_show, 3, 1, 1, 2)
+            advanced_l.addWidget(advanced_ack, 4, 1, 1, 2)
+            advanced_l.addWidget(advanced_note, 5, 0, 1, 3)
+            advanced_l.addWidget(advanced_apply, 6, 0, 1, 3, Qt.AlignLeft)
+            advanced_l.setColumnStretch(1, 1)
+            advanced_l.setRowStretch(7, 1)
+            studio_tabs.addTab(advanced_page, tr("Advanced", "Lanjutan"))
+
+            # Safe draft preview ----------------------------------------------
+            draft_page = QWidget()
+            draft_l = QVBoxLayout(draft_page)
+            draft_preview = QPlainTextEdit()
+            draft_preview.setObjectName("siteConfigDraftPreview")
+            draft_preview.setReadOnly(True)
+            draft_preview.setLineWrapMode(QPlainTextEdit.NoWrap)
+            draft_l.addWidget(QLabel(tr(
+                "Effective extractor config (credentials hidden)",
+                "Config extractor efektif (credential disembunyikan)",
+            )))
+            draft_l.addWidget(draft_preview, 1)
+            reset_draft = QPushButton(tr("Discard all Site Studio draft changes", "Buang semua perubahan draft Studio Situs"))
+            draft_l.addWidget(reset_draft, 0, Qt.AlignLeft)
+            studio_tabs.addTab(draft_page, tr("Safe Preview", "Preview Aman"))
+
+            def update_studio_preview() -> None:
+                effective = proposed_config().get("extractor", {})
+                safe = redact_auth_config(effective)
+                draft_preview.setPlainText(json.dumps(safe, indent=2, ensure_ascii=False))
+
+            def selected_config_category() -> str:
+                if config_scope.currentData() == "general":
+                    return ""
+                return normalized_site(config_site)
+
+            def config_value_text(value: object) -> str:
+                if value is None:
+                    return ""
+                if isinstance(value, bool):
+                    return "true" if value else "false"
+                if isinstance(value, (dict, list)):
+                    return json.dumps(value, ensure_ascii=False)
+                return str(value)
+
+            def current_config_value(category: str, spec: ConfigOptionSpec) -> tuple[object, str, bool]:
+                extractor = proposed_config().get("extractor", {})
+                if not isinstance(extractor, dict):
+                    extractor = {}
+                if category:
+                    block = extractor.get(category, {})
+                    if isinstance(block, dict) and spec.key in block:
+                        return block[spec.key], tr("Site override", "Override situs"), True
+                    if spec.key in extractor:
+                        return extractor[spec.key], tr("Inherited General", "Warisan Umum"), False
+                elif spec.key in extractor:
+                    return extractor[spec.key], tr("General", "Umum"), True
+                return spec.default, tr("Built-in default", "Default bawaan"), False
+
+            def selected_config_spec() -> ConfigOptionSpec | None:
+                category = selected_config_category()
+                key = str(config_option_key.currentData() or config_option_key.currentText()).strip()
+                return next((item for item in config_option_definitions(category) if item.key == key), None)
+
+            def configure_config_option(*_args) -> None:
+                spec = selected_config_spec()
+                if spec is None:
+                    option_description.clear()
+                    config_option_value.clear()
+                    config_option_apply.setEnabled(False)
+                    config_option_remove.setEnabled(False)
+                    return
+                config_option_apply.setEnabled(True)
+                config_option_remove.setEnabled(True)
+                category = selected_config_category()
+                value, source, explicitly_set = current_config_value(category, spec)
+                type_index = config_option_type.findData(spec.value_type)
+                config_option_type.setCurrentIndex(max(0, type_index))
+                config_option_value.blockSignals(True)
+                try:
+                    config_option_value.clear()
+                    for choice in spec.choices:
+                        config_option_value.addItem(config_value_text(choice), choice)
+                    editor = config_option_value.lineEdit()
+                    editor.clear()
+                    if spec.sensitive:
+                        editor.setPlaceholderText(tr(
+                            "Stored value is hidden; enter a replacement or use Remove",
+                            "Nilai tersimpan disembunyikan; masukkan pengganti atau gunakan Hapus",
+                        ) if explicitly_set else tr(
+                            "Sensitive value (stored as plain text)",
+                            "Nilai sensitif (disimpan sebagai teks biasa)",
+                        ))
+                    else:
+                        editor.setText(config_value_text(value))
+                        editor.setPlaceholderText(tr("Enter a value", "Masukkan nilai"))
+                finally:
+                    config_option_value.blockSignals(False)
+                config_option_show.setVisible(spec.sensitive)
+                config_option_ack.setVisible(spec.sensitive)
+                config_option_ack.setChecked(False)
+                config_option_value.lineEdit().setEchoMode(
+                    QLineEdit.Normal if not spec.sensitive or config_option_show.isChecked()
+                    else QLineEdit.Password
+                )
+                scope_name = tr("General option", "Opsi Umum") if spec.scope == "general" else tr(
+                    "Site-specific option", "Opsi khusus situs"
+                )
+                option_description.setText(
+                    f"{scope_name} · {source} · {spec.group}\n{spec.description}"
+                )
+
+            def reload_config_options(*_args) -> None:
+                try:
+                    category = selected_config_category()
+                except ValueError:
+                    return
+                config_site.setEnabled(bool(category))
+                specs = config_option_definitions(category)
+                previous = str(config_option_key.currentData() or config_option_key.currentText()).strip()
+                config_option_key.blockSignals(True)
+                try:
+                    config_option_key.clear()
+                    for spec in specs:
+                        config_option_key.addItem(spec.key, spec.key)
+                    previous_index = config_option_key.findData(previous)
+                    if previous_index >= 0:
+                        config_option_key.setCurrentIndex(previous_index)
+                finally:
+                    config_option_key.blockSignals(False)
+
+                needle = config_option_search.text().strip().lower()
+                visible_specs = [
+                    spec for spec in specs
+                    if not needle or needle in " ".join((
+                        spec.key, spec.group, spec.description,
+                    )).lower()
+                ]
+                config_option_table.setSortingEnabled(False)
+                config_option_table.setRowCount(len(visible_specs))
+                for row, spec in enumerate(visible_specs):
+                    value, source, _explicit = current_config_value(category, spec)
+                    default_text = config_value_text(spec.default)
+                    current_text = "<hidden>" if spec.sensitive and value is not None else config_value_text(value)
+                    values = (
+                        spec.key,
+                        current_text,
+                        source,
+                        default_text,
+                        spec.value_type,
+                        spec.group,
+                    )
+                    for column, cell in enumerate(values):
+                        item = QTableWidgetItem(cell)
+                        if column == 0:
+                            item.setData(Qt.UserRole, spec.key)
+                        if spec.sensitive and column in {1, 3}:
+                            item.setToolTip(tr("Sensitive value is never revealed here.", "Nilai sensitif tidak pernah ditampilkan di sini."))
+                        config_option_table.setItem(row, column, item)
+                config_option_table.setSortingEnabled(True)
+                configure_config_option()
+
+            def choose_table_option(row: int, _column: int) -> None:
+                item = config_option_table.item(row, 0)
+                if item is None:
+                    return
+                key = str(item.data(Qt.UserRole) or item.text())
+                index = config_option_key.findData(key)
+                if index >= 0:
+                    config_option_key.setCurrentIndex(index)
+
+            def apply_config_option() -> None:
+                try:
+                    category = selected_config_category()
+                    spec = selected_config_spec()
+                    if spec is None:
+                        raise ValueError(tr("Choose an option first.", "Pilih opsi terlebih dahulu."))
+                    raw_value = config_option_value.currentText()
+                    if spec.sensitive and not raw_value:
+                        raise ValueError(tr(
+                            "Enter a replacement value, or use Remove / inherit.",
+                            "Masukkan nilai pengganti, atau gunakan Hapus / warisi.",
+                        ))
+                    if spec.sensitive and not config_option_ack.isChecked():
+                        raise ValueError(tr(
+                            "Confirm plain-text storage for this sensitive option.",
+                            "Konfirmasikan penyimpanan teks biasa untuk opsi sensitif ini.",
+                        ))
+                    value = parse_typed_config_value(raw_value, str(config_option_type.currentData()))
+                except ValueError as exc:
+                    self.show_compact_message(tr("Config option", "Opsi config"), str(exc), "warning")
+                    return
+                if category:
+                    block = site_overrides.setdefault(category, {})
+                    block[spec.key] = value
+                    removed = site_removals.get(category)
+                    if removed:
+                        removed.discard(spec.key)
+                        if not removed:
+                            site_removals.pop(category, None)
+                else:
+                    general_overrides[spec.key] = value
+                    general_removals.discard(spec.key)
+                scope.setCurrentIndex(scope.findData("config"))
+                if spec.sensitive:
+                    config_option_value.clear()
+                    config_option_ack.setChecked(False)
+                refresh_preview()
+                update_studio_preview()
+                reload_config_options()
+
+            def remove_config_option() -> None:
+                try:
+                    category = selected_config_category()
+                    spec = selected_config_spec()
+                except ValueError:
+                    return
+                if spec is None:
+                    return
+                if category:
+                    block = site_overrides.get(category)
+                    if block is not None:
+                        block.pop(spec.key, None)
+                        if not block:
+                            site_overrides.pop(category, None)
+                    site_removals.setdefault(category, set()).add(spec.key)
+                else:
+                    general_overrides.pop(spec.key, None)
+                    general_removals.add(spec.key)
+                scope.setCurrentIndex(scope.findData("config"))
+                refresh_preview()
+                update_studio_preview()
+                reload_config_options()
+
+            def toggle_config_secret(visible: bool) -> None:
+                spec = selected_config_spec()
+                config_option_value.lineEdit().setEchoMode(
+                    QLineEdit.Normal if visible or spec is None or not spec.sensitive
+                    else QLineEdit.Password
+                )
+
+            def load_archive() -> None:
+                try:
+                    category = normalized_site(archive_site)
+                except ValueError as exc:
+                    self.show_compact_message(tr("Archive settings", "Pengaturan archive"), str(exc), "warning")
+                    return
+                extractor = proposed_config().get("extractor", {})
+                block = extractor.get(category, {}) if isinstance(extractor, dict) else {}
+                if not isinstance(block, dict):
+                    block = {}
+                site_archive_path.setText(str(block.get("archive") or ""))
+                site_archive_format.setText(str(block.get("archive-format") or "{service}{user}{id}_{num}"))
+                site_duplicates.setChecked(bool(block.get("duplicates", False)))
+
+            def browse_site_archive() -> None:
+                chosen, _ = QFileDialog.getSaveFileName(
+                    studio,
+                    tr("Choose site archive database", "Pilih database archive situs"),
+                    site_archive_path.text(),
+                    "SQLite (*.sqlite3 *.sqlite *.db);;All files (*.*)",
+                )
+                if chosen:
+                    site_archive_path.setText(chosen)
+
+            def apply_archive() -> None:
+                try:
+                    category = normalized_site(archive_site)
+                    block = site_archive_options(
+                        site_archive_path.text(),
+                        duplicates=site_duplicates.isChecked(),
+                        archive_format=site_archive_format.text(),
+                    )
+                except ValueError as exc:
+                    self.show_compact_message(tr("Archive settings", "Pengaturan archive"), str(exc), "warning")
+                    return
+                merge_override(category, block)
+
+            def apply_reddit() -> None:
+                block = reddit_site_options(reddit_client_id.text(), reddit_user_agent.text())
+                if not block:
+                    self.show_compact_message("Reddit", tr("Enter at least one Reddit setting.", "Masukkan minimal satu pengaturan Reddit."), "warning")
+                    return
+                merge_override("reddit", block)
+                reddit_client_id.clear()
+
+            def load_reddit() -> None:
+                extractor = proposed_config().get("extractor", {})
+                block = extractor.get("reddit", {}) if isinstance(extractor, dict) else {}
+                if not isinstance(block, dict):
+                    block = {}
+                reddit_user_agent.setText(str(block.get("user-agent-oauth") or ""))
+                if block.get("client-id"):
+                    reddit_client_id.setPlaceholderText(tr(
+                        "An existing client ID is stored; blank keeps it",
+                        "Client ID lama sudah tersimpan; kosong mempertahankannya",
+                    ))
+
+            def toggle_pixiv_secrets(visible: bool) -> None:
+                echo = QLineEdit.Normal if visible else QLineEdit.Password
+                pixiv_refresh_token.setEchoMode(echo)
+                pixiv_phpsessid.setEchoMode(echo)
+
+            def apply_pixiv() -> None:
+                block = pixiv_site_options(
+                    include=[key for key, checkbox in pixiv_include.items() if checkbox.isChecked()],
+                    embeds=pixiv_embeds.isChecked(),
+                    covers=pixiv_covers.isChecked(),
+                    full_series=pixiv_full_series.isChecked(),
+                    metadata=pixiv_metadata.isChecked(),
+                    ugoira=pixiv_ugoira.currentData(),
+                )
+                refresh_value = pixiv_refresh_token.text()
+                cookie_value = pixiv_phpsessid.text()
+                if (refresh_value or cookie_value) and not pixiv_secret_ack.isChecked():
+                    self.show_compact_message(
+                        "Pixiv",
+                        tr("Confirm the plain-text credential warning first.", "Konfirmasikan peringatan credential teks biasa terlebih dahulu."),
+                        "warning",
+                    )
+                    return
+                if refresh_value:
+                    block["refresh-token"] = refresh_value
+                if cookie_value:
+                    block["cookies"] = {"PHPSESSID": cookie_value}
+                merge_override("pixiv", block)
+                pixiv_refresh_token.clear()
+                pixiv_phpsessid.clear()
+                pixiv_secret_ack.setChecked(False)
+
+            def load_pixiv() -> None:
+                extractor = proposed_config().get("extractor", {})
+                block = extractor.get("pixiv", {}) if isinstance(extractor, dict) else {}
+                if not isinstance(block, dict):
+                    block = {}
+                included = block.get("include", [])
+                if isinstance(included, str):
+                    included = [included]
+                included_set = {
+                    str(item).strip().lower()
+                    for item in included
+                } if isinstance(included, list) else set()
+                for key, checkbox in pixiv_include.items():
+                    checkbox.setChecked(key in included_set)
+                pixiv_embeds.setChecked(bool(block.get("embeds", False)))
+                pixiv_covers.setChecked(bool(block.get("covers", False)))
+                pixiv_full_series.setChecked(bool(block.get("full-series", False)))
+                pixiv_metadata.setChecked(bool(block.get("metadata", False)))
+                ugoira_value = block.get("ugoira", "original")
+                ugoira_index = pixiv_ugoira.findData(ugoira_value)
+                pixiv_ugoira.setCurrentIndex(max(0, ugoira_index))
+                if block.get("refresh-token"):
+                    pixiv_refresh_token.setPlaceholderText(tr(
+                        "An existing refresh token is stored; blank keeps it",
+                        "Refresh token lama sudah tersimpan; kosong mempertahankannya",
+                    ))
+                cookies = block.get("cookies", {})
+                if isinstance(cookies, dict) and cookies.get("PHPSESSID"):
+                    pixiv_phpsessid.setPlaceholderText(tr(
+                        "An existing PHPSESSID is stored; blank keeps it",
+                        "PHPSESSID lama sudah tersimpan; kosong mempertahankannya",
+                    ))
+
+            def update_advanced_visibility(*_args) -> None:
+                sensitive = is_sensitive_option_key(advanced_key.text().strip())
+                advanced_show.setVisible(sensitive)
+                advanced_ack.setVisible(sensitive)
+                advanced_value.setEchoMode(
+                    QLineEdit.Normal if not sensitive or advanced_show.isChecked() else QLineEdit.Password
+                )
+
+            def apply_advanced() -> None:
+                try:
+                    category = normalized_site(advanced_site)
+                    key = advanced_key.text().strip()
+                    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.-]*", key):
+                        raise ValueError(tr("Enter a valid option key.", "Masukkan nama opsi yang valid."))
+                    if is_sensitive_option_key(key) and not advanced_ack.isChecked():
+                        raise ValueError(tr(
+                            "Confirm plain-text storage for this sensitive option.",
+                            "Konfirmasikan penyimpanan teks biasa untuk opsi sensitif ini.",
+                        ))
+                    value = parse_typed_config_value(advanced_value.text(), str(advanced_type.currentData()))
+                except ValueError as exc:
+                    self.show_compact_message(tr("Advanced option", "Opsi lanjutan"), str(exc), "warning")
+                    return
+                merge_override(category, {key: value})
+                advanced_value.clear()
+
+            def discard_draft() -> None:
+                general_overrides.clear()
+                site_overrides.clear()
+                general_removals.clear()
+                site_removals.clear()
+                refresh_preview()
+                update_studio_preview()
+                reload_config_options()
+
+            site_archive_browse.clicked.connect(browse_site_archive)
+            archive_load.clicked.connect(load_archive)
+            archive_apply.clicked.connect(apply_archive)
+            reddit_show.toggled.connect(
+                lambda checked: reddit_client_id.setEchoMode(QLineEdit.Normal if checked else QLineEdit.Password)
+            )
+            reddit_apply.clicked.connect(apply_reddit)
+            pixiv_show.toggled.connect(toggle_pixiv_secrets)
+            pixiv_apply.clicked.connect(apply_pixiv)
+            advanced_key.textChanged.connect(update_advanced_visibility)
+            advanced_show.toggled.connect(update_advanced_visibility)
+            advanced_apply.clicked.connect(apply_advanced)
+            reset_draft.clicked.connect(discard_draft)
+            config_scope.currentIndexChanged.connect(reload_config_options)
+            config_site.currentIndexChanged.connect(reload_config_options)
+            config_option_search.textChanged.connect(reload_config_options)
+            config_option_key.currentIndexChanged.connect(configure_config_option)
+            config_option_table.cellClicked.connect(choose_table_option)
+            config_option_show.toggled.connect(toggle_config_secret)
+            config_option_apply.clicked.connect(apply_config_option)
+            config_option_remove.clicked.connect(remove_config_option)
+
+            footer = QHBoxLayout()
+            footer.addStretch(1)
+            done = QPushButton(tr("Done", "Selesai"))
+            done.setObjectName("siteConfigDone")
+            done.clicked.connect(studio.accept)
+            footer.addWidget(done)
+            studio_l.addLayout(footer)
+            update_advanced_visibility()
+            load_archive()
+            load_reddit()
+            load_pixiv()
+            update_studio_preview()
+            reload_config_options()
+            studio.exec()
+
         def browse_folder() -> None:
             chosen = QFileDialog.getExistingDirectory(dlg, tr("Choose download folder", "Pilih folder download"), destination.text())
             if chosen:
@@ -1659,19 +2989,36 @@ class ComposerMixin:
                 ),
             }
             auth_method_help.setText(help_texts.get(method, ""))
+            preserve = selected_auth_category()
+            populate_auth_sites(method, preserve)
             if method == "credentials":
                 scope.setCurrentIndex(scope.findData("config"))
             if method == "oauth":
                 category = selected_auth_category()
-                if category:
-                    oauth_site.setEditText(category)
+                oauth_index = oauth_site.findData(category)
+                if oauth_index >= 0:
+                    oauth_site.setCurrentIndex(oauth_index)
             refresh_preview()
 
         def sync_oauth_site(*_args) -> None:
             if auth_method.currentData() == "oauth":
                 category = selected_auth_category()
-                if category:
-                    oauth_site.setEditText(category)
+                oauth_index = oauth_site.findData(category)
+                if oauth_index >= 0 and oauth_index != oauth_site.currentIndex():
+                    oauth_site.setCurrentIndex(oauth_index)
+            refresh_preview()
+
+        def sync_auth_site_from_oauth(*_args) -> None:
+            category = str(oauth_site.currentData() or "")
+            oauth_instance.setEnabled(category == "mastodon")
+            oauth_response.setEnabled(category == "pixiv")
+            oauth_send.setEnabled(
+                category == "pixiv" and oauth_process.state() != QProcess.NotRunning
+            )
+            if auth_method.currentData() == "oauth":
+                index = auth_site.findData(category)
+                if index >= 0 and index != auth_site.currentIndex():
+                    auth_site.setCurrentIndex(index)
             refresh_preview()
 
         def toggle_secret_visibility(visible: bool) -> None:
@@ -1694,13 +3041,13 @@ class ComposerMixin:
 
         oauth_process = QProcess(dlg)
         oauth_process.setProcessChannelMode(QProcess.MergedChannels)
+        oauth_output_buffer: list[str] = [""]
 
         def oauth_parts() -> list[str]:
-            target = oauth_site.currentText().strip()
-            if target.lower().startswith("oauth:"):
-                oauth_target = target
-            else:
-                oauth_target = "oauth:" + target
+            oauth_target = composer_oauth_target(
+                str(oauth_site.currentData() or ""),
+                oauth_instance.text(),
+            )
             base = command_string_to_argv(self.gdl_cmd or "gallery-dl")
             return base + [oauth_target] if base else ["gallery-dl", oauth_target]
 
@@ -1710,42 +3057,58 @@ class ComposerMixin:
         def read_oauth_output() -> None:
             data = bytes(oauth_process.readAllStandardOutput()).decode("utf-8", errors="replace")
             if data:
-                oauth_status.moveCursor(QTextCursor.End)
-                oauth_status.insertPlainText(redact_sensitive_text(data))
-                oauth_status.ensureCursorVisible()
+                # OAuth output can arrive with the bare token in a later chunk
+                # than its label. Buffer it until completion so no transient UI
+                # update can expose the newly issued credential.
+                oauth_output_buffer[0] += data
+
+        def append_oauth_output(text: str) -> None:
+            oauth_status.moveCursor(QTextCursor.End)
+            oauth_status.insertPlainText(text)
+            oauth_status.ensureCursorVisible()
 
         def oauth_finished(exit_code: int, _status) -> None:
             read_oauth_output()
+            if oauth_output_buffer[0]:
+                append_oauth_output(redact_oauth_output(oauth_output_buffer[0]))
+                oauth_output_buffer[0] = ""
             oauth_start.setEnabled(True)
             oauth_stop.setEnabled(False)
+            oauth_send.setEnabled(False)
             oauth_status.appendPlainText(tr(
                 f"\nOAuth process finished with exit code {exit_code}. If authorization succeeded, test the site with Simulate only.",
                 f"\nProses OAuth selesai dengan kode {exit_code}. Jika otorisasi berhasil, uji situs memakai Hanya simulasi.",
             ))
 
         def oauth_error(_error) -> None:
+            if oauth_output_buffer[0]:
+                append_oauth_output(redact_oauth_output(oauth_output_buffer[0]))
+                oauth_output_buffer[0] = ""
             oauth_start.setEnabled(True)
             oauth_stop.setEnabled(False)
+            oauth_send.setEnabled(False)
             oauth_status.appendPlainText(tr(
                 "Could not start OAuth: ",
                 "Tidak dapat memulai OAuth: ",
             ) + oauth_process.errorString())
 
         def start_oauth() -> None:
-            target = oauth_site.currentText().strip()
-            if not target:
-                self.show_compact_message("OAuth", tr("Choose an OAuth site.", "Pilih situs OAuth."), "warning")
+            try:
+                parts = oauth_parts()
+            except ValueError as exc:
+                self.show_compact_message("OAuth", str(exc), "warning")
                 return
             if oauth_process.state() != QProcess.NotRunning:
                 return
-            parts = oauth_parts()
             oauth_status.clear()
+            oauth_output_buffer[0] = ""
             oauth_status.appendPlainText(tr(
                 "Starting official gallery-dl OAuth flow...\nYour browser should open. Complete authorization there and return here.\n\n",
                 "Memulai alur OAuth resmi gallery-dl...\nBrowser akan terbuka. Selesaikan otorisasi di sana lalu kembali ke sini.\n\n",
             ))
             oauth_start.setEnabled(False)
             oauth_stop.setEnabled(True)
+            oauth_send.setEnabled(oauth_site.currentData() == "pixiv")
             oauth_process.setProgram(parts[0])
             oauth_process.setArguments(parts[1:])
             oauth_process.start()
@@ -1756,8 +3119,24 @@ class ComposerMixin:
                 if not oauth_process.waitForFinished(1200):
                     oauth_process.kill()
 
+        def send_oauth_response() -> None:
+            value = oauth_response.text().strip()
+            if not value or oauth_process.state() == QProcess.NotRunning:
+                return
+            oauth_process.write((value + "\n").encode("utf-8"))
+            oauth_response.clear()
+            oauth_status.appendPlainText(tr(
+                "Pixiv authorization response sent securely.",
+                "Respons otorisasi Pixiv dikirim dengan aman.",
+            ))
+
         def copy_oauth_command() -> None:
-            QApplication.clipboard().setText(oauth_command_text())
+            try:
+                command = oauth_command_text()
+            except ValueError as exc:
+                self.show_compact_message("OAuth", str(exc), "warning")
+                return
+            QApplication.clipboard().setText(command)
             self.show_compact_message("OAuth", tr("OAuth command copied.", "Command OAuth disalin."), "info")
 
         def cleanup_oauth(*_args) -> None:
@@ -1892,7 +3271,12 @@ class ComposerMixin:
                     self.show_compact_message("cookies.txt", message, "warning")
                     tabs.setCurrentWidget(auth_scroll)
                     return
-            requires_saved_config = state.apply_to_config or bool(state.secret_value or state.extra_auth_value)
+            requires_saved_config = (
+                state.apply_to_config
+                or bool(state.secret_value or state.extra_auth_value)
+                or bool(general_overrides or general_removals or site_removals)
+                or bool(site_overrides)
+            )
             if requires_saved_config and proposed_config() != existing_config:
                 answer = QMessageBox.question(
                     dlg,
@@ -1981,6 +3365,10 @@ class ComposerMixin:
                 config_path_label.setText(str(target))
                 existing_config = data
                 config_error = None
+                general_overrides.clear()
+                site_overrides.clear()
+                general_removals.clear()
+                site_removals.clear()
                 self._refresh_env()
                 scope.setCurrentIndex(scope.findData("config"))
                 refresh_preview()
@@ -2010,19 +3398,22 @@ class ComposerMixin:
         recipe.currentTextChanged.connect(apply_recipe)
         auth_method.currentIndexChanged.connect(update_auth_method)
         auth_site.currentIndexChanged.connect(sync_oauth_site)
-        if auth_site.lineEdit() is not None:
-            auth_site.lineEdit().textEdited.connect(sync_oauth_site)
+        oauth_site.currentIndexChanged.connect(sync_auth_site_from_oauth)
+        oauth_instance.textChanged.connect(refresh_preview)
         show_secrets.toggled.connect(toggle_secret_visibility)
         prepare_test.clicked.connect(prepare_safe_test)
         remove_auth.clicked.connect(remove_saved_auth_data)
         oauth_start.clicked.connect(start_oauth)
         oauth_stop.clicked.connect(stop_oauth)
+        oauth_send.clicked.connect(send_oauth_response)
+        oauth_response.returnPressed.connect(send_oauth_response)
         oauth_copy.clicked.connect(copy_oauth_command)
         oauth_process.readyReadStandardOutput.connect(read_oauth_output)
         oauth_process.finished.connect(oauth_finished)
         oauth_process.errorOccurred.connect(oauth_error)
         dlg.finished.connect(cleanup_oauth)
         site_search.textChanged.connect(filter_sites)
+        site_config_button.clicked.connect(open_site_config_studio)
         select_common.clicked.connect(lambda: _set_checks(site_checks, {"pixiv", "twitter", "instagram", "reddit", "deviantart", "danbooru", "gelbooru"}, refresh_preview))
         select_none.clicked.connect(lambda: _set_checks(site_checks, set(), refresh_preview))
 
@@ -2075,6 +3466,7 @@ class ComposerMixin:
 
         apply_loaded_defaults()
         update_auth_method()
+        sync_auth_site_from_oauth()
         refresh_preview()
         dlg.exec()
 
@@ -2082,7 +3474,7 @@ class ComposerMixin:
 def _bounded_int(value: object, minimum: int, maximum: int) -> int:
     try:
         return max(minimum, min(maximum, int(float(value))))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return minimum
 
 
@@ -2095,12 +3487,21 @@ def _set_checks(checks: dict[str, QCheckBox], selected: set[str], callback) -> N
 
 
 __all__ = [
+    "ConfigOptionSpec",
     "ComposerFlowchart",
     "ComposerMixin",
     "ComposerState",
+    "OAUTH_SITE_CHOICES",
+    "apply_config_editor_drafts",
     "build_composer_argv",
     "build_composer_config",
+    "composer_oauth_target",
+    "config_option_definitions",
     "config_defaults",
+    "parse_typed_config_value",
+    "pixiv_site_options",
+    "reddit_site_options",
     "redact_auth_config",
+    "site_archive_options",
     "validate_cookies_txt",
 ]

@@ -6,6 +6,7 @@ import re
 import shutil
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 import zipfile
@@ -21,13 +22,38 @@ from .core import (
     classify_error,
     command_string_to_argv,
     ensure_no_option,
+    normalize_destination_argv,
     normalize_process_return_code,
     redact_sensitive_argv,
     redact_sensitive_text,
+    sanitize_service_policy,
     split_command,
     strip_gallery_dl_invocation,
 )
 from .models import DownloadJob
+
+
+def _secure_temporary_path(target: Path) -> Path:
+    """Reserve a private, collision-resistant sibling path for atomic output."""
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{target.name}.",
+        suffix=".tmp",
+        dir=target.parent,
+    )
+    os.close(descriptor)
+    return Path(temporary_name)
+
+
+def _redact_exception_with_argv(exc: Exception, argv: list[str]) -> str:
+    """Redact argv values embedded in subprocess exception representations."""
+    message = redact_sensitive_text(str(exc))
+    for original, redacted in zip(argv, redact_sensitive_argv(argv), strict=True):
+        if original and original != redacted:
+            # subprocess exceptions render argv through ``repr(list)``. Match
+            # that exact token boundary: replacing a short raw secret such as
+            # ``a`` would otherwise corrupt every word containing that letter.
+            message = message.replace(repr(original), repr(redacted))
+    return redact_sensitive_text(message)
 
 
 class DownloadWorker(QThread):
@@ -85,7 +111,7 @@ class DownloadWorker(QThread):
         self.compress_enabled = compress_enabled
         self.compress_format = compress_format
         self.convert_png_webp = convert_png_webp
-        self.service_policy = {str(k).lower(): v for k, v in (service_policy or {}).items()}
+        self.service_policy = sanitize_service_policy(service_policy)
         self.service_locks = service_locks or {}
         self._proc: Optional[subprocess.Popen] = None
         self.current_job_idx: Optional[int] = None
@@ -134,22 +160,23 @@ class DownloadWorker(QThread):
             raise FileNotFoundError("gallery-dl command is empty")
 
         if job.is_command:
-            tokens = split_command(job.raw)
+            tokens = normalize_destination_argv(split_command(job.raw))
             args = strip_gallery_dl_invocation(tokens)
         else:
             # A hand-written row may be ``URL --range 1-10``.  Passing the
             # entire line as one argv element makes gallery-dl treat the spaces
             # and options as part of the URL.  Tokenize option-bearing rows,
             # while preserving a single raw URL as one argument.
-            tokens = split_command(job.raw)
+            tokens = normalize_destination_argv(split_command(job.raw))
             args = tokens if len(tokens) > 1 else [job.raw]
 
         final = list(base)
-        if self.config_path and Path(self.config_path).is_file() and ensure_no_option(
+        config_path = Path(self.config_path).expanduser() if self.config_path else None
+        if config_path and config_path.is_file() and ensure_no_option(
             args,
             ("-c", "--config", "--config-ignore"),
         ):
-            final += ["--config", self.config_path]
+            final += ["--config", str(config_path)]
         if self.output_dir and job.dest == "-" and ensure_no_option(
             args,
             ("-d", "--destination", "-D", "--directory"),
@@ -269,9 +296,6 @@ class DownloadWorker(QThread):
                     if png.is_symlink():
                         continue
                     webp = png.with_suffix(".webp")
-                    temporary_webp = webp.with_name(
-                        f".{webp.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-                    )
                     # Retries and multiple jobs sharing one destination hit the
                     # same folder repeatedly; do not redo finished conversions.
                     if webp.exists():
@@ -281,7 +305,9 @@ class DownloadWorker(QThread):
                     # the whole conversion pass (previously the loop-level
                     # except skipped every remaining file). A failed save also
                     # must not leave a partial .webp behind.
+                    temporary_webp: Path | None = None
                     try:
+                        temporary_webp = _secure_temporary_path(webp)
                         with Image.open(png) as im:
                             im.save(temporary_webp, "WEBP", quality=90)
                         if self.postprocessing_interrupted():
@@ -292,7 +318,8 @@ class DownloadWorker(QThread):
                     except Exception as exc:
                         failed += 1
                         try:
-                            temporary_webp.unlink(missing_ok=True)
+                            if temporary_webp is not None:
+                                temporary_webp.unlink(missing_ok=True)
                         except Exception:
                             pass
                         self.log.emit(self.worker_id, f"[post] PNG to WebP failed for {png.name}: {exc}")
@@ -320,10 +347,9 @@ class DownloadWorker(QThread):
             # Use the full folder name as the archive base. ``with_suffix`` would
             # corrupt names that contain dots (e.g. "Creator.v2" -> "Creator.zip").
             archive = folder.parent / (folder.name + ".zip")
-            temporary = archive.with_name(
-                f".{archive.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-            )
+            temporary: Path | None = None
             try:
+                temporary = _secure_temporary_path(archive)
                 with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as zf:
                     for file in folder.rglob("*"):
                         if self.postprocessing_interrupted():
@@ -340,7 +366,8 @@ class DownloadWorker(QThread):
                 return "; ".join([*conversion_errors, success])
             except Exception as exc:
                 try:
-                    temporary.unlink(missing_ok=True)
+                    if temporary is not None:
+                        temporary.unlink(missing_ok=True)
                 except OSError:
                     pass
                 return "; ".join([*conversion_errors, f"compression failed: {exc}"])
@@ -358,11 +385,20 @@ class DownloadWorker(QThread):
         cb_type = {"cbz": "zip", "cb7": "7z", "cbr": "zip"}.get(fmt)
         archive_type = cb_type or fmt
         archive_path = Path(str(folder) + f".{fmt}")
-        temporary_path = archive_path.with_name(
-            f".{archive_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
-        )
-        cmd = [sevenz, "a", f"-t{archive_type}", str(temporary_path), str(folder)]
+        temporary_path: Path | None = None
         try:
+            # Reserve a private name, then remove the empty placeholder because
+            # 7-Zip expects to create the archive itself. The random mkstemp
+            # component prevents stale/colliding predictable names.
+            temporary_path = _secure_temporary_path(archive_path)
+            temporary_path.unlink()
+            cmd = [
+                sevenz,
+                "a",
+                f"-t{archive_type}",
+                str(temporary_path),
+                str(folder),
+            ]
             creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if IS_WINDOWS else 0
             cp = subprocess.Popen(
                 cmd,
@@ -396,11 +432,13 @@ class DownloadWorker(QThread):
                 f"compression failed rc={cp.returncode}: {(stderr or stdout)[-300:]}",
             ])
         except Exception as exc:
+            return "; ".join([*conversion_errors, f"compression failed: {exc}"])
+        finally:
             try:
-                temporary_path.unlink(missing_ok=True)
+                if temporary_path is not None:
+                    temporary_path.unlink(missing_ok=True)
             except OSError:
                 pass
-            return "; ".join([*conversion_errors, f"compression failed: {exc}"])
 
     def run(self) -> None:
         while not self.stop_event.is_set():
@@ -640,6 +678,7 @@ class CommandProbeWorker(QThread):
         self._probe_stopped = threading.Event()
 
     def run(self) -> None:
+        cmd: list[str] = []
         try:
             if self._probe_stopped.is_set():
                 return
@@ -673,17 +712,22 @@ class CommandProbeWorker(QThread):
                     cp.kill()
                     stdout, stderr = cp.communicate()
                 if not was_user_stopped:
-                    self.done.emit("", -1, str(exc))
+                    self.done.emit("", -1, _redact_exception_with_argv(exc, cmd))
                 return
+            streams = [
+                stream.strip()
+                for stream in (stdout, stderr)
+                if stream and stream.strip()
+            ]
             output = redact_sensitive_text(
-                (stdout or stderr or "").strip() or f"Return code: {cp.returncode}"
+                "\n".join(streams) or f"Return code: {cp.returncode}"
             )
             if self._probe_stopped.is_set():
                 return
             self.done.emit(output, normalize_process_return_code(cp.returncode), "")
         except Exception as exc:
             if not self._probe_stopped.is_set():
-                self.done.emit("", -1, str(exc))
+                self.done.emit("", -1, _redact_exception_with_argv(exc, cmd))
         finally:
             with self._probe_lock:
                 self._probe_proc = None

@@ -2,4 +2,4 @@ include README.md
 include CHANGELOG.md
 include SECURITY.md
 include ARCHITECTURE.md
-recursive-include gallery_dl_app/assets *.png *.svg
+recursive-include gallery_dl_app/assets *.png

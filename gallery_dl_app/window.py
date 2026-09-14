@@ -268,10 +268,9 @@ def _patched_gallery_dl_config_template_text(self: MainWindow, preset: str = "Sa
         extractor["cookies"] = [browser]
         extractor["cookies-update"] = True
     if "rate" in key:
-        # Plain duration ranges work on the minimum supported gallery-dl 1.29
-        # as well as newer releases. Duration+ forms (``exp:...=...``) are
-        # supported only by newer versions and crash 1.29 while initializing
-        # an extractor, before any download can start.
+        # Plain duration ranges work on the minimum supported gallery-dl and
+        # later releases. Keep generated defaults conservative because exotic
+        # duration expressions vary between gallery-dl versions.
         extractor.update({"sleep": "2.0-5.0", "sleep-request": "1.5-3.0", "sleep-retries": "60-300", "sleep-429": "120-900", "retries": 8})
     if "windows" in key:
         extractor.update({"path-restrict": "windows", "path-strip": "windows", "path-extended": True})

@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import importlib.util
 import io
+import math
 import os
 import platform
 import re
@@ -10,11 +11,11 @@ import shlex
 import shutil
 import subprocess
 import sys
-import threading
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
-from urllib.parse import unquote_plus
+from urllib.parse import unquote_plus, urlparse
 
 from .models import DownloadJob
 
@@ -24,7 +25,7 @@ IS_MACOS = platform.system() == "Darwin"
 
 APP_NAME = "GdlScrape"
 
-APP_VERSION = "1.0"
+APP_VERSION = "1.01"
 
 APP_DIR = Path.home() / ".gallery_dl_gui_dashboard"
 
@@ -222,7 +223,6 @@ def atomic_write_text(
     """
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_name(f"{target.name}.{os.getpid()}.{threading.get_ident()}.tmp")
     effective_mode = mode
     if effective_mode is None:
         try:
@@ -231,24 +231,33 @@ def atomic_write_text(
             effective_mode = target.stat().st_mode & 0o7777
         except OSError:
             effective_mode = None
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{target.name}.",
+        suffix=".tmp",
+        dir=target.parent,
+    )
+    tmp = Path(temporary_name)
     try:
-        with open(tmp, "w", encoding=encoding, newline=newline) as fh:
-            if effective_mode is not None:
-                # Apply restrictive permissions before writing sensitive data;
-                # chmod after the replace leaves a window where the temp file
-                # can be read by other local users on POSIX systems.
-                os.chmod(tmp, effective_mode)
+        if effective_mode is not None:
+            # Apply restrictive permissions before writing sensitive data;
+            # chmod after the replace leaves a window where the temp file can
+            # be read by other local users on POSIX systems. mkstemp itself
+            # securely creates new files as 0600 when no prior mode exists.
+            os.chmod(tmp, effective_mode)
+        stream = os.fdopen(descriptor, "w", encoding=encoding, newline=newline)
+        descriptor = -1
+        with stream as fh:
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, target)
-    except Exception:
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
         try:
-            if tmp.exists():
-                tmp.unlink()
-        except Exception:
+            tmp.unlink(missing_ok=True)
+        except OSError:
             pass
-        raise
 
 def is_false_value(value: str) -> bool:
     return str(value or "").strip().lower() in {"0", "false", "no", "n", "off", "disabled"}
@@ -260,6 +269,8 @@ def safe_bool(value: object, default: bool = False) -> bool:
     if value is None:
         return default
     if isinstance(value, (int, float)):
+        if isinstance(value, float) and not math.isfinite(value):
+            return default
         return value != 0
     if isinstance(value, str):
         normalized = value.strip().lower()
@@ -344,6 +355,8 @@ def read_text_safely(path: str | Path) -> str:
     # former latin-1 fallback decoded it without error but produced NUL-filled
     # garbage rows.  Decode BOM-marked UTF-16 first, then reject remaining NUL
     # bytes as a likely binary/wrong-file import.
+    if raw.startswith((b"\xff\xfe\x00\x00", b"\x00\x00\xfe\xff")):
+        return raw.decode("utf-32")
     if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
         return raw.decode("utf-16")
     if b"\x00" in raw[:8192]:
@@ -354,6 +367,31 @@ def read_text_safely(path: str | Path) -> str:
         except UnicodeDecodeError:
             continue
     return raw.decode("utf-8", errors="replace")
+
+
+def validate_cookies_txt(path: str) -> tuple[bool, str]:
+    """Perform a bounded, lightweight Netscape cookies.txt format check."""
+    if not str(path or "").strip():
+        return False, "No cookies.txt file selected."
+    target = Path(path).expanduser()
+    if not target.exists() or not target.is_file():
+        return False, "cookies.txt file does not exist."
+    try:
+        with target.open("rb") as handle:
+            text = handle.read(512 * 1024).decode("utf-8-sig", errors="replace")
+    except Exception as exc:
+        return False, f"Could not read cookies.txt: {exc}"
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("#HttpOnly_"):
+            line = line[len("#HttpOnly_") :]
+        elif line.startswith("#"):
+            continue
+        if len(line.split("\t")) >= 7:
+            return True, "Netscape cookies.txt format detected."
+    return False, "No Netscape-format cookie rows were found (expected 7 tab-separated columns)."
 
 def _strip_wrapping_quotes(text: str) -> str:
     text = text.strip()
@@ -424,7 +462,9 @@ def command_executable_available(command: str | None) -> bool:
     candidate = Path(executable).expanduser()
     looks_like_path = candidate.is_absolute() or "/" in executable or "\\" in executable
     if looks_like_path:
-        return candidate.is_file()
+        return candidate.is_file() and (
+            IS_WINDOWS or os.access(candidate, os.X_OK)
+        )
     return shutil.which(executable) is not None
 
 def find_gallery_dl() -> str | None:
@@ -452,6 +492,7 @@ def detect_config_path() -> str | None:
         appdata = Path(os.environ.get("APPDATA", str(home / "AppData" / "Roaming")))
         candidates.extend([
             appdata / "gallery-dl" / "config.json",
+            home / "gallery-dl" / "config.json",
             home / "gallery-dl.conf",
             home / ".config" / "gallery-dl" / "config.json",
         ])
@@ -487,27 +528,107 @@ def parse_url_meta(url: str) -> tuple[str, str]:
     service, ident = "-", "-"
     if not url.lower().startswith(("http://", "https://")):
         return service, ident
-    low = url.lower()
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+    except ValueError:
+        return service, ident
+    if not host:
+        return service, ident
+    path = parsed.path.lower()
     # Alphanumeric IDs, not just \d+: coomer's main services (onlyfans,
     # fansly, candfans) use string usernames, which the old numeric-only
     # pattern missed — service fell back to the domain ("coomer"/"kemono"),
     # so per-service rate policy keyed on "onlyfans" never matched and
     # grouping/stats were wrong. Also accept kemono's /discord/server/<id>.
-    m = re.search(r"(?:kemono|coomer)\.[\w.-]+/(\w+)/(?:user|server)/([\w.\-@]+)", low)
-    if m:
-        return m.group(1), m.group(2)
-    m = re.search(r"pixiv\.net/.*?users/(\d+)", low)
-    if m:
-        return "pixiv", m.group(1)
-    m = re.search(r"https?://(?:www\.)?([\w-]+)\.", low)
-    if m:
-        service = m.group(1)
-    m = re.search(r"/(\d{3,})(?:[/?#].*)?$", url)
+    # Match against the parsed host/path only: a nested URL in ?next= or a
+    # fragment must never reclassify the actual target.
+    normalized_host = host[4:] if host.startswith("www.") else host
+    if normalized_host.startswith(("kemono.", "coomer.")):
+        m = re.search(r"/(\w+)/(?:user|server)/([\w.\-@]+)", path)
+        if m:
+            return m.group(1), m.group(2)
+    if host == "pixiv.net" or host.endswith(".pixiv.net"):
+        m = re.search(r"/users/(\d+)", path)
+        if m:
+            return "pixiv", m.group(1)
+    # Host aliases and common subdomains must map to gallery-dl's extractor
+    # category.  Using the first hostname label classified x.com as "x" and
+    # mobile.twitter.com / old.reddit.com as "mobile" / "old", so rate policy,
+    # grouping, and library statistics never matched their real categories.
+    category_domains = {
+        "x.com": "twitter",
+        "twitter.com": "twitter",
+        "reddit.com": "reddit",
+        "pixiv.net": "pixiv",
+        "instagram.com": "instagram",
+        "deviantart.com": "deviantart",
+    }
+    for domain, category in category_domains.items():
+        if host == domain or host.endswith("." + domain):
+            service = category
+            break
+    if service == "-":
+        service = normalized_host.split(".", 1)[0] or "-"
+    m = re.search(r"/(\d{3,})(?:/.*)?$", path)
     if m:
         ident = m.group(1)
     return service, ident
 
+def normalize_destination_argv(tokens: list[str]) -> list[str]:
+    """Normalize unusable trailing spaces/dots in Windows destination values."""
+    normalized = list(tokens)
+    if not IS_WINDOWS:
+        return normalized
+
+    def clean(value: str) -> str:
+        if value in {".", ".."} or value.endswith(("\\.", "\\..", "/.", "/..")):
+            return value
+        return value.rstrip(" .")
+
+    index = 0
+    while index < len(normalized):
+        token = normalized[index]
+        if token == "--":
+            break
+        if token in ("-d", "--destination", "-D", "--directory"):
+            if index + 1 < len(normalized):
+                normalized[index + 1] = clean(normalized[index + 1])
+            index += 2
+            continue
+        for prefix in (
+            "--destination=",
+            "--directory=",
+            "-d=",
+            "-D=",
+        ):
+            if token.startswith(prefix):
+                normalized[index] = prefix + clean(token[len(prefix):])
+                break
+        else:
+            if token.startswith(("-d", "-D")) and len(token) > 2 and not token.startswith("--"):
+                normalized[index] = token[:2] + clean(token[2:])
+            elif token.startswith("-") and token != "-":
+                flag, has_equals, _attached = token.partition("=")
+                if flag in GALLERY_DL_VARIADIC_VALUE_FLAGS and not has_equals:
+                    # argparse consumes every token up to ``--`` as a value;
+                    # none of them can be a destination option.
+                    break
+                value_count = GALLERY_DL_OPTION_VALUE_COUNTS.get(flag, 0)
+                if value_count and not has_equals:
+                    attached_short = (
+                        flag.startswith("-")
+                        and not flag.startswith("--")
+                        and len(flag) == 2
+                        and len(token) > 2
+                    )
+                    index += value_count - 1 if attached_short else value_count
+        index += 1
+    return normalized
+
+
 def extract_destination(tokens: list[str]) -> str:
+    tokens = normalize_destination_argv(tokens)
     i = 0
     while i < len(tokens):
         token = tokens[i]
@@ -526,6 +647,8 @@ def extract_destination(tokens: list[str]) -> str:
             return token[2:]
         if token.startswith("-") and token != "-":
             flag, has_equals, _attached = token.partition("=")
+            if flag in GALLERY_DL_VARIADIC_VALUE_FLAGS and not has_equals:
+                break
             value_count = GALLERY_DL_OPTION_VALUE_COUNTS.get(flag, 0)
             if value_count and not has_equals:
                 attached_short = (
@@ -546,7 +669,7 @@ def normalized_job_argv(job: DownloadJob) -> tuple[str, ...]:
     remain part of the identity; two rows for the same URL but with different
     ranges or output folders are therefore never removed as duplicates.
     """
-    tokens = split_command(job.raw)
+    tokens = normalize_destination_argv(split_command(job.raw))
     if is_gallery_dl_invocation(tokens):
         tokens = strip_gallery_dl_invocation(tokens)
     identity = list(tokens or [job.raw.strip()])
@@ -610,10 +733,18 @@ def _row_value(row: dict[str, str], *names: str) -> str:
     # possible in XLSX cells): a command/url cell spanning lines would
     # otherwise become a multi-line "raw" entry that splits into garbage rows
     # on reparse. One database entry must stay one line.
-    lower = {
-        str(k).strip().lower(): " ".join(str(v or "").split())
-        for k, v in row.items()
-    }
+    lower = {}
+    for key, raw_value in row.items():
+        value = "" if raw_value is None else str(raw_value)
+        # CSV exports prefix formula-triggering values with an apostrophe so
+        # Excel opens them as text. Remove only that exact marker on import so
+        # an export/import round-trip restores the original command argument.
+        # Do this before whitespace flattening: otherwise ``'\t...`` becomes
+        # ``' ...`` and leaves a stray apostrophe argv element in the command.
+        if len(value) >= 2 and value[0] == "'" and value[1] in "=+-@\t\r":
+            value = value[1:]
+        value = " ".join(value.split())
+        lower[str(key).strip().lower()] = value
     for name in names:
         value = lower.get(name.lower())
         if value:
@@ -775,7 +906,11 @@ def redact_sensitive_argv(argv: list[str]) -> list[str]:
         out[i] = _redact_url_credentials(out[i])
 
         i += 1
-    return out
+    # An option value can itself be a small command or JSON document (for
+    # example ``--exec`` or ``--config-json``). Apply the arbitrary-text
+    # boundary to every display token so nested credentials do not bypass the
+    # top-level argv rules above.
+    return [redact_sensitive_text(token) for token in out]
 
 def redact_sensitive_text(text: str) -> str:
     """Redact secrets from an arbitrary log/report line without reformatting it."""
@@ -803,7 +938,8 @@ def redact_sensitive_text(text: str) -> str:
     value = re.sub(
         r"(?P<key_quote>[\"'])(?P<key>[A-Za-z][A-Za-z0-9_.-]*)"
         r"(?P=key_quote)(?P<separator>\s*:\s*)"
-        r"(?P<value_quote>[\"']).*?(?P=value_quote)",
+        r"(?P<value_quote>[\"'])(?:\\.|(?!(?P=value_quote))[^\\\r\n])*"
+        r"(?P=value_quote)",
         redact_quoted_field,
         value,
     )
@@ -819,7 +955,8 @@ def redact_sensitive_text(text: str) -> str:
 
     value = re.sub(
         r"(?<![?&#A-Za-z0-9_.-])(?P<key>[A-Za-z][A-Za-z0-9_.-]*)"
-        r"(?P<separator>\s*=\s*)(?P<quote>[\"']).*?(?P=quote)",
+        r"(?P<separator>\s*=\s*)(?P<quote>[\"'])"
+        r"(?:\\.|(?!(?P=quote))[^\\\r\n])*(?P=quote)",
         redact_assignment,
         value,
     )
@@ -841,6 +978,38 @@ def redact_sensitive_text(text: str) -> str:
     option_key = r"[A-Za-z][A-Za-z0-9_.-]*"
     quoted_value = r'(?:"(?:\\.|[^"\r\n])*"|\'(?:\\.|[^\'\r\n])*\')'
 
+    # subprocess exceptions render argv as a Python list/tuple repr rather
+    # than as a command line. Handle its quote/comma boundaries explicitly;
+    # the normal whitespace-delimited patterns below cannot see through them.
+    value = re.sub(
+        rf"(?i)(?P<flag_quote>[\"'])(?P<flag>{long_flags})(?P=flag_quote)"
+        rf"(?P<separator>\s*,\s*)(?P<value_quote>[\"'])"
+        rf"[^\"'\r\n]*(?P=value_quote)",
+        lambda match: (
+            f"{match.group('flag_quote')}{match.group('flag')}"
+            f"{match.group('flag_quote')}{match.group('separator')}"
+            f"{match.group('value_quote')}{REDACTED}{match.group('value_quote')}"
+        ),
+        value,
+    )
+    value = re.sub(
+        rf"(?i)(?P<quote>[\"'])(?P<flag>{long_flags})="
+        rf"[^\"'\r\n]*(?P=quote)",
+        lambda match: (
+            f"{match.group('quote')}{match.group('flag')}={REDACTED}"
+            f"{match.group('quote')}"
+        ),
+        value,
+    )
+    value = re.sub(
+        r"(?P<quote>[\"'])(?P<flag>-[puC])(?:=)?[^\"'\r\n]+(?P=quote)",
+        lambda match: (
+            f"{match.group('quote')}{match.group('flag')}{REDACTED}"
+            f"{match.group('quote')}"
+        ),
+        value,
+    )
+
     # Quoted credentials must be handled before whitespace-delimited forms.
     # Otherwise only the first word is replaced and the rest of a value such as
     # ``--password "top secret value"`` remains visible in every persistence
@@ -859,11 +1028,14 @@ def redact_sensitive_text(text: str) -> str:
     def redact_option_pair(match: re.Match[str]) -> str:
         if not is_sensitive_option_key(match.group(2)):
             return match.group(0)
-        return f"{match.group(1)} {match.group(2)}={REDACTED}"
+        return (
+            f"{match.group(1)}{match.group('option_separator')}"
+            f"{match.group(2)}={REDACTED}"
+        )
 
     # Cover both --option password="..." and --option "password=...".
     value = re.sub(
-        rf"(?i)(?<!\S)(-o|--option)(?:=|\s+)"
+        rf"(?i)(?<!\S)(-o|--option)(?P<option_separator>=|\s+)"
         rf"({option_key})=({quoted_value})",
         redact_option_pair,
         value,
@@ -873,12 +1045,13 @@ def redact_sensitive_text(text: str) -> str:
         if not is_sensitive_option_key(match.group("key")):
             return match.group(0)
         return (
-            f"{match.group(1)} {match.group('quote')}{match.group('key')}="
+            f"{match.group(1)}{match.group('wrapped_separator')}"
+            f"{match.group('quote')}{match.group('key')}="
             f"{REDACTED}{match.group('quote')}"
         )
 
     value = re.sub(
-        rf"(?i)(?<!\S)(-o|--option)(?:=|\s+)"
+        rf"(?i)(?<!\S)(-o|--option)(?P<wrapped_separator>=|\s+)"
         rf"(?P<quote>[\"'])(?P<key>{option_key})="
         rf"[^\r\n]*?(?P=quote)",
         redact_wrapped_option_pair,
@@ -899,7 +1072,7 @@ def redact_sensitive_text(text: str) -> str:
             value,
         )
         value = re.sub(
-            rf"(?i)(?<!\S)(-o|--option)(?:=|\s+)"
+            rf"(?i)(?<!\S)(-o|--option)(?P<option_separator>=|\s+)"
             rf"({option_key})={unclosed_quote}",
             redact_option_pair,
             value,
@@ -915,7 +1088,7 @@ def redact_sensitive_text(text: str) -> str:
         value,
     )
     value = re.sub(
-        rf"(?i)(?<!\S)(-o|--option)(?:=|\s+)"
+        rf"(?i)(?<!\S)(-o|--option)(?P<option_separator>=|\s+)"
         rf"({option_key})=[^\s]+",
         redact_option_pair,
         value,
@@ -928,7 +1101,8 @@ def redact_sensitive_text(text: str) -> str:
     # ``--header \"Authorization: Bearer x\" URL`` into a malformed command
     # with no URL. Handle quote-bounded command values first.
     value = re.sub(
-        rf"(?i)(?P<quote>[\"'])(?P<name>{header_names})\s*:\s*.*?(?P=quote)",
+        rf"(?i)(?P<quote>[\"'])(?P<name>{header_names})\s*:\s*"
+        rf"(?:\\.|(?!(?P=quote))[^\\\r\n])*(?P=quote)",
         lambda match: (
             f"{match.group('quote')}{match.group('name')}: "
             f"{REDACTED}{match.group('quote')}"
@@ -940,7 +1114,8 @@ def redact_sensitive_text(text: str) -> str:
     # ``{'Authorization': 'Bearer x'}``, without deleting adjacent fields.
     value = re.sub(
         rf"(?i)(?P<key_quote>[\"'])(?P<name>{header_names})(?P=key_quote)"
-        rf"\s*:\s*(?P<value_quote>[\"']).*?(?P=value_quote)",
+        rf"\s*:\s*(?P<value_quote>[\"'])"
+        rf"(?:\\.|(?!(?P=value_quote))[^\\\r\n])*(?P=value_quote)",
         lambda match: (
             f"{match.group('key_quote')}{match.group('name')}"
             f"{match.group('key_quote')}: {match.group('value_quote')}"
@@ -971,6 +1146,17 @@ def redact_sensitive_text(text: str) -> str:
         value,
     )
     return value
+
+
+def redact_oauth_output(text: str) -> str:
+    """Mask OAuth helper tokens that gallery-dl prints as unlabeled value lines."""
+    value = redact_sensitive_text(text)
+    return re.sub(
+        r"(?is)(Your\s+[^\r\n]*(?:token|secret|key)[^\r\n]*"
+        r"\r?\n\s*\r?\n)(.*?)(?=\r?\n\s*\r?\n|$)",
+        lambda match: match.group(1) + REDACTED,
+        value,
+    )
 
 
 def redact_sensitive_database_text(text: str) -> str:
@@ -1044,8 +1230,12 @@ def csv_rows_first_column_fallback(text: str, dialect: csv.Dialect, skip_header:
 
 def classify_error(text: str) -> str:
     low = text.lower()
-    if any(x in low for x in ["timed out", "connection", "network", "temporary failure", "ssl"]):
-        return "network"
+    # Specific causes determine retry policy and must win when an exception is
+    # also wrapped in generic connection/network wording. Match ``rate`` only
+    # at word boundaries so unrelated text such as ``generated`` is not
+    # classified as a rate limit.
+    if re.search(r"\brate(?:[- ]?limit(?:ed|ing)?)?\b|\b429\b|too many requests", low):
+        return "rate-limit"
     if any(x in low for x in ["401", "403", "forbidden", "unauthorized", "login", "cookie"]):
         return "auth/cookies"
     if any(x in low for x in ["404", "not found", "does not exist"]):
@@ -1054,8 +1244,8 @@ def classify_error(text: str) -> str:
         return "config"
     if any(x in low for x in ["permission", "access is denied", "no such file", "path"]):
         return "path"
-    if any(x in low for x in ["rate", "too many requests", "429"]):
-        return "rate-limit"
+    if any(x in low for x in ["timed out", "connection", "network", "temporary failure", "ssl"]):
+        return "network"
     return "unknown"
 
 def ensure_no_option(args: list[str], names: tuple[str, ...]) -> bool:
@@ -1177,26 +1367,35 @@ def strip_gallery_dl_invocation(tokens: list[str]) -> list[str]:
 # from URLs embedded in --exec commands, headers, proxies, output paths, or the
 # two-value --print-to-file option. Unknown option tokens themselves are still
 # ignored, so an embedded URL in ``--flag=https://...`` is never selected.
+GALLERY_DL_VARIADIC_VALUE_FLAGS = {"--list-extractors"}
+
+
 GALLERY_DL_OPTION_VALUE_COUNTS: dict[str, int] = {
     "-f": 1, "--filename": 1,
     "-d": 1, "--destination": 1,
     "-D": 1, "--directory": 1,
+    "--restrict-filenames": 1,
     "-X": 1, "--extractors": 1,
-    "--user-agent": 1, "--clear-cache": 1,
+    "-a": 1, "--user-agent": 1, "--clear-cache": 1,
     "-i": 1, "--input-file": 1,
     "-I": 1, "--input-file-comment": 1,
     "-x": 1, "--input-file-delete": 1,
     "-e": 1, "--error-file": 1,
     "-N": 1, "--print": 1,
+    "--Print": 1,
     "--print-to-file": 2,
+    "--Print-to-file": 2,
     "--list-extractors": 1,
     "--write-log": 1, "--write-unsupported": 1,
+    "--xff": 1,
     "-R": 1, "--retries": 1,
     "--http-timeout": 1, "--proxy": 1, "--source-address": 1,
     "-r": 1, "--limit-rate": 1, "--chunk-size": 1,
     "--sleep": 1, "--sleep-request": 1, "--sleep-extractor": 1,
     "-o": 1, "--option": 1,
     "-c": 1, "--config": 1, "--config-yaml": 1, "--config-toml": 1,
+    "--config-json": 1, "--config-type": 1,
+    "--cache-file": 1, "--cache-show": 1, "--cache-clear": 1,
     "-u": 1, "--username": 1,
     "-p": 1, "--password": 1,
     "-C": 1, "--cookies": 1,
@@ -1205,8 +1404,12 @@ GALLERY_DL_OPTION_VALUE_COUNTS: dict[str, int] = {
     "-T": 1, "--terminate": 1,
     "--filesize-min": 1, "--filesize-max": 1,
     "--download-archive": 1,
+    "--blacklist": 1, "--whitelist": 1,
+    "--tags-blacklist": 1, "--tags-whitelist": 1,
     "--range": 1, "--chapter-range": 1,
+    "--file-range": 1, "--image-range": 1,
     "--filter": 1, "--chapter-filter": 1,
+    "--file-filter": 1, "--image-filter": 1,
     "-P": 1, "--postprocessor": 1,
     "-O": 1, "--postprocessor-option": 1,
     "--mtime": 1, "--rename": 1, "--rename-to": 1,
@@ -1223,8 +1426,14 @@ GALLERY_DL_OPTION_VALUE_COUNTS: dict[str, int] = {
 
 def _extract_url_from_tokens(tokens: list[str], fallback: str) -> str:
     values_remaining = 0
+    variadic_values = False
     positional_only = False
     for token in tokens:
+        if variadic_values:
+            if token == "--":
+                variadic_values = False
+                positional_only = True
+            continue
         if values_remaining:
             values_remaining -= 1
             continue
@@ -1233,6 +1442,9 @@ def _extract_url_from_tokens(tokens: list[str], fallback: str) -> str:
             continue
         if not positional_only and token.startswith("-") and token != "-":
             flag, has_equals, _attached = token.partition("=")
+            if flag in GALLERY_DL_VARIADIC_VALUE_FLAGS and not has_equals:
+                variadic_values = True
+                continue
             count = GALLERY_DL_OPTION_VALUE_COUNTS.get(flag, 0)
             if count and not has_equals:
                 # One-letter options accept attached values (-dPATH, -R5,
@@ -1251,6 +1463,71 @@ def _extract_url_from_tokens(tokens: list[str], fallback: str) -> str:
             return match.group(0)
     return fallback
 
+
+def _gallery_dl_command_has_source(tokens: list[str]) -> bool:
+    """Return whether an invocation has a positional or input-file source."""
+    input_file_flags = {
+        "-i",
+        "--input-file",
+        "-I",
+        "--input-file-comment",
+        "-x",
+        "--input-file-delete",
+    }
+    values_remaining = 0
+    value_option = ""
+    positional_only = False
+    has_source = False
+    for token in strip_gallery_dl_invocation(tokens):
+        if values_remaining:
+            if value_option in input_file_flags and token:
+                has_source = True
+            values_remaining -= 1
+            if not values_remaining:
+                value_option = ""
+            continue
+        if not positional_only and token == "--":
+            positional_only = True
+            continue
+        if not positional_only and token.startswith("-") and token != "-":
+            flag, separator, attached = token.partition("=")
+            # gallery-dl handles this as an informational top-level mode and
+            # never reaches its URL downloader, even if a URL/input file also
+            # appears elsewhere in argv.
+            if flag in GALLERY_DL_VARIADIC_VALUE_FLAGS:
+                return False
+            if flag in input_file_flags and separator:
+                if attached:
+                    has_source = True
+                # An explicitly empty input-file value is invalid, but a
+                # later positional source can still make the invocation a
+                # runnable job. Keep scanning instead of discarding it.
+                continue
+            attached_input_flag = next(
+                (
+                    candidate
+                    for candidate in ("-i", "-I", "-x")
+                    if token.startswith(candidate) and len(token) > len(candidate)
+                ),
+                None,
+            )
+            if attached_input_flag:
+                has_source = True
+                continue
+            count = GALLERY_DL_OPTION_VALUE_COUNTS.get(flag, 0)
+            if count and not separator:
+                attached_short = (
+                    flag.startswith("-")
+                    and not flag.startswith("--")
+                    and len(flag) == 2
+                    and len(token) > 2
+                )
+                values_remaining = count - 1 if attached_short else count
+                value_option = flag if values_remaining else ""
+            continue
+        has_source = True
+    return has_source
+
 def parse_line(line: str, tag: str = "", notes: str = "") -> Optional[DownloadJob]:
     raw = line.strip()
     if not raw or raw.startswith("#"):
@@ -1262,6 +1539,12 @@ def parse_line(line: str, tag: str = "", notes: str = "") -> Optional[DownloadJo
     # second, conflicting default destination later in build_command().
     dest = extract_destination(tokens)
     if is_cmd:
+        # Destination-only rows are useful editable templates, but they are
+        # not runnable jobs. Keep them in the editor while excluding them from
+        # queue counts and worker dispatch. Input-file commands and special
+        # positional targets remain valid without an inline HTTP URL.
+        if not _gallery_dl_command_has_source(tokens):
+            return None
         url = _extract_url_from_tokens(tokens, raw)
     else:
         url = _extract_url_from_tokens(tokens or [raw], raw)
@@ -1301,4 +1584,4 @@ def dependency_status() -> dict[str, bool]:
         "7z/7za/7zz": (shutil.which("7z") is not None or shutil.which("7za") is not None or shutil.which("7zz") is not None),
     }
 
-__all__ = ['IS_WINDOWS', 'IS_MACOS', 'APP_NAME', 'APP_VERSION', 'APP_DIR', 'HISTORY_FILE', 'HISTORY_MAX_BYTES', 'HISTORY_TRIM_BYTES', 'AUTOSAVE_FILE', 'BACKUP_DIR', 'PROFILES_DIR', 'SETTINGS_FILE', 'MAX_LOG_BLOCKS', 'MAX_LOG_LINES', 'MAX_LOG_LINE_CHARS', 'STOP_GRACE_SECONDS', 'MAX_IMPORT_BYTES', 'MAX_QUEUE_JOBS', 'MAX_COMMAND_LINE_CHARS', 'MAX_QUEUE_SOURCE_ROWS', 'REDACTED', 'SECRET_VALUE_FLAGS', 'SECRET_OPTION_KEYS', 'MANAGED_AUTH_KEYS', 'GALLERY_DL_OPTION_VALUE_COUNTS', 'OFFICIAL_GALLERY_DL_LINKS', 'OFFICIAL_GALLERY_DL_DEPENDENCIES', 'app_data_dir', 'timestamp_slug', 'unique_path', 'human_size', 'safe_expand_path', 'atomic_write_text', 'is_false_value', 'safe_bool', 'is_sensitive_option_key', 'append_extra_args_to_command', 'append_extra_args_to_database_text', 'command_with_destination', 'looks_like_database_entry', 'sanitize_service_policy', 'read_text_safely', '_strip_wrapping_quotes', '_windows_cmdline_to_argv', 'split_command', 'command_string_to_argv', 'command_executable_available', 'find_gallery_dl', 'detect_config_path', 'open_path', 'parse_url_meta', 'extract_destination', 'normalized_job_argv', 'find_exact_duplicate_groups', 'parse_text_database', '_row_value', 'redact_sensitive_argv', 'redact_sensitive_text', 'redact_sensitive_database_text', 'quote_arg_for_preview', 'build_raw_command_from_columns', 'csv_rows_first_column_fallback', 'classify_error', 'ensure_no_option', 'safe_int', 'normalize_process_return_code', 'safe_filename', 'sanitize_spreadsheet_cell', '_gdl_basename', '_is_python_launcher', 'is_gallery_dl_invocation', 'strip_gallery_dl_invocation', '_extract_url_from_tokens', 'parse_line', 'dependency_status']
+__all__ = ['IS_WINDOWS', 'IS_MACOS', 'APP_NAME', 'APP_VERSION', 'APP_DIR', 'HISTORY_FILE', 'HISTORY_MAX_BYTES', 'HISTORY_TRIM_BYTES', 'AUTOSAVE_FILE', 'BACKUP_DIR', 'PROFILES_DIR', 'SETTINGS_FILE', 'MAX_LOG_BLOCKS', 'MAX_LOG_LINES', 'MAX_LOG_LINE_CHARS', 'STOP_GRACE_SECONDS', 'MAX_IMPORT_BYTES', 'MAX_QUEUE_JOBS', 'MAX_COMMAND_LINE_CHARS', 'MAX_QUEUE_SOURCE_ROWS', 'REDACTED', 'SECRET_VALUE_FLAGS', 'SECRET_OPTION_KEYS', 'MANAGED_AUTH_KEYS', 'GALLERY_DL_OPTION_VALUE_COUNTS', 'GALLERY_DL_VARIADIC_VALUE_FLAGS', 'OFFICIAL_GALLERY_DL_LINKS', 'OFFICIAL_GALLERY_DL_DEPENDENCIES', 'app_data_dir', 'timestamp_slug', 'unique_path', 'human_size', 'safe_expand_path', 'atomic_write_text', 'is_false_value', 'safe_bool', 'is_sensitive_option_key', 'append_extra_args_to_command', 'append_extra_args_to_database_text', 'command_with_destination', 'looks_like_database_entry', 'sanitize_service_policy', 'read_text_safely', 'validate_cookies_txt', '_strip_wrapping_quotes', '_windows_cmdline_to_argv', 'split_command', 'command_string_to_argv', 'command_executable_available', 'find_gallery_dl', 'detect_config_path', 'open_path', 'parse_url_meta', 'extract_destination', 'normalized_job_argv', 'find_exact_duplicate_groups', 'parse_text_database', '_row_value', 'redact_sensitive_argv', 'redact_sensitive_text', 'redact_oauth_output', 'redact_sensitive_database_text', 'quote_arg_for_preview', 'build_raw_command_from_columns', 'csv_rows_first_column_fallback', 'classify_error', 'ensure_no_option', 'safe_int', 'normalize_process_return_code', 'safe_filename', 'sanitize_spreadsheet_cell', '_gdl_basename', '_is_python_launcher', 'is_gallery_dl_invocation', 'strip_gallery_dl_invocation', '_extract_url_from_tokens', 'parse_line', 'dependency_status']

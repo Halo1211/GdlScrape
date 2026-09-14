@@ -8,6 +8,7 @@ import os
 import platform
 import shutil
 import sys
+import tempfile
 import threading
 import time
 import zipfile
@@ -125,9 +126,13 @@ def write_app_data_backup(
     target_path = Path(target).expanduser()
     target_path.parent.mkdir(parents=True, exist_ok=True)
     entries = _app_data_backup_entries(app_dir, backup_dir, target_path)
-    tmp = target_path.with_name(
-        f"{target_path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{target_path.name}.",
+        suffix=".tmp",
+        dir=target_path.parent,
     )
+    os.close(descriptor)
+    tmp = Path(temporary_name)
     try:
         with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             for file, relative in entries:
@@ -208,7 +213,7 @@ class CancellableFileTask(QThread):
         except InterruptedError:
             return
         except Exception as exc:
-            self.failed.emit(str(exc))
+            self.failed.emit(redact_sensitive_text(str(exc)))
             return
         if not self._stop_event.is_set():
             self.completed.emit(result)
@@ -290,7 +295,11 @@ class ReportsMixin:
     def export_logs(self) -> None:
         path, _ = QFileDialog.getSaveFileName(self, "Export logs", str(APP_DIR / "combined_log.txt"), "Text (*.txt)")
         if path:
-            self._safe_write_file(path, "\n".join(self.all_log_lines), "Export logs")
+            self._safe_write_file(
+                path,
+                redact_sensitive_database_text("\n".join(self.all_log_lines)),
+                "Export logs",
+            )
 
     def export_txt(self) -> None:
         path, _ = QFileDialog.getSaveFileName(self, "Export TXT database", str(APP_DIR / "Link Database.txt"), "Text (*.txt)")
@@ -364,7 +373,7 @@ class ReportsMixin:
             "time": time.strftime("%Y-%m-%d %H:%M:%S"),
             "platform": platform.platform(),
             "python": sys.version.replace("\n", " "),
-            "gallery_dl_command": self.gdl_cmd or "not found",
+            "gallery_dl_command": redact_sensitive_text(self.gdl_cmd or "not found"),
             "config_path": self.config_path or "not detected",
             "config_state": config_state,
             "output": disk,
@@ -499,10 +508,15 @@ class ReportsMixin:
         except Exception as exc:
             issues.append(f"Output folder problem: {exc}")
         for p in roots.values():
+            if p.exists() and not p.is_dir():
+                issues.append(f"Destination is not a directory: {p}")
+                continue
             probe = p
             while probe != probe.parent and not probe.exists():
                 probe = probe.parent
             try:
+                if not probe.is_dir():
+                    raise NotADirectoryError(probe)
                 free = shutil.disk_usage(probe).free
                 if free < 1024 ** 3:
                     issues.append(f"Low disk space for {p}: {human_size(free)} free")
@@ -862,7 +876,10 @@ Important
     def show_compact_message(self, title: str, message: str, level: str = "info") -> None:
         """Compact message dialog with no wasted QMessageBox whitespace."""
         title = self._ui_translate_text(title)
-        message = self._ui_translate_text(message)
+        # Dialogs are a final user-visible sink for errors from subprocesses,
+        # config parsing, file tasks, and database operations. Redact here as
+        # defense in depth so a new caller cannot accidentally expose auth.
+        message = self._ui_translate_text(redact_sensitive_text(str(message)))
         dlg = QDialog(self)
         dlg.setWindowTitle(title)
         dlg.setModal(True)
@@ -905,7 +922,7 @@ Important
     def show_scroll_message(self, title: str, message: str, level: str = "info") -> None:
         """Show longer messages in a bounded, scrollable dialog."""
         title = self._ui_translate_text(title)
-        msg = self._ui_translate_text(str(message))
+        msg = self._ui_translate_text(redact_sensitive_text(str(message)))
         if len(msg) < 700 and "\n" not in msg[:120]:
             self.show_compact_message(title, msg, level)
             return

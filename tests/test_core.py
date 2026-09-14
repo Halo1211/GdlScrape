@@ -1,3 +1,4 @@
+import os
 import queue
 import tempfile
 import subprocess
@@ -10,13 +11,23 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import gallery_dl_app as gui
+from PySide6.QtWidgets import QMessageBox
+from gallery_dl_app.advanced_tools import AdvancedToolsMixin
 from gallery_dl_app.composer import (
     ComposerState,
+    _bounded_int,
     _read_json_config,
+    apply_config_editor_drafts,
     build_composer_argv,
     build_composer_config,
+    composer_oauth_target,
+    config_option_definitions,
     config_defaults,
+    parse_typed_config_value,
+    pixiv_site_options,
+    reddit_site_options,
     redact_auth_config,
+    site_archive_options,
     validate_cookies_txt,
 )
 from gallery_dl_app.queue_controller import (
@@ -25,6 +36,7 @@ from gallery_dl_app.queue_controller import (
     validate_xlsx_archive,
 )
 from gallery_dl_app.reports import (
+    CancellableFileTask,
     ReportsMixin,
     is_restorable_autosave,
     scan_output_tree,
@@ -95,12 +107,91 @@ class SecretVaultTests(unittest.TestCase):
 
 
 class ParserTests(unittest.TestCase):
+    def test_utf32_text_database_is_decoded_without_nul_characters(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "utf32.txt"
+            expected = "https://example.com/gallery/123\n"
+            path.write_bytes(expected.encode("utf-32"))
+
+            decoded = gui.read_text_safely(path)
+
+        self.assertEqual(decoded, expected)
+        self.assertNotIn("\x00", decoded)
+
+    def test_false_boolean_enabled_cell_disables_import_row(self):
+        self.assertIsNone(
+            gui.build_raw_command_from_columns({
+                "url": "https://example.com/a",
+                "enabled": False,
+            })
+        )
+
+    def test_non_finite_numeric_booleans_use_the_requested_default(self):
+        for value in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(value=value):
+                self.assertFalse(gui.safe_bool(value, False))
+                self.assertTrue(gui.safe_bool(value, True))
+
+    def test_service_detection_uses_gallery_dl_category_for_domain_aliases(self):
+        cases = {
+            "https://x.com/artist/status/123456789": ("twitter", "123456789"),
+            "https://mobile.twitter.com/artist/status/123456789": ("twitter", "123456789"),
+            "https://old.reddit.com/r/pics/comments/abc123/title/": ("reddit", "-"),
+        }
+        for url, expected in cases.items():
+            with self.subTest(url=url):
+                self.assertEqual(gui.parse_url_meta(url), expected)
+
+    def test_service_detection_tolerates_malformed_ipv6_url(self):
+        self.assertEqual(gui.parse_url_meta("https://[invalid"), ("-", "-"))
+
+    def test_service_detection_ignores_urls_embedded_in_query_values(self):
+        url = (
+            "https://example.com/gallery/111?next="
+            "https://www.pixiv.net/users/222"
+        )
+
+        self.assertEqual(gui.parse_url_meta(url), ("example", "111"))
+
     def test_command_executable_availability_rejects_missing_path_and_directory(self):
         with tempfile.TemporaryDirectory() as folder:
             self.assertFalse(gui.command_executable_available(folder))
             self.assertFalse(gui.command_executable_available(str(Path(folder) / "missing.exe")))
         self.assertTrue(gui.command_executable_available(sys.executable))
         self.assertTrue(gui.command_executable_available(f'"{sys.executable}" -m gallery_dl'))
+
+    def test_posix_command_path_must_have_execute_permission(self):
+        with tempfile.TemporaryDirectory() as folder:
+            command = Path(folder) / "gallery-dl"
+            command.write_text("#!/bin/sh\n", encoding="utf-8")
+            with (
+                patch("gallery_dl_app.core.IS_WINDOWS", False),
+                patch("gallery_dl_app.core.os.access", return_value=False),
+            ):
+                self.assertFalse(gui.command_executable_available(str(command)))
+
+    def test_rate_limit_classification_wins_over_generic_connection_text(self):
+        self.assertEqual(
+            gui.classify_error("Connection failed: HTTP 429 Too Many Requests"),
+            "rate-limit",
+        )
+
+    def test_specific_errors_win_over_generic_connection_wording(self):
+        cases = {
+            "Connection failed: HTTP 403 Forbidden": "auth/cookies",
+            "Network response: HTTP 404 Not Found": "not-found",
+            "Connection failed because config JSON is invalid": "config",
+            "Connection failed: output path has no such file": "path",
+        }
+        for message, expected in cases.items():
+            with self.subTest(message=message):
+                self.assertEqual(gui.classify_error(message), expected)
+
+    def test_rate_detection_does_not_match_inside_unrelated_words(self):
+        self.assertEqual(
+            gui.classify_error("Generated output has an unknown failure"),
+            "unknown",
+        )
 
     def test_windows_native_return_code_fits_qt_signed_int(self):
         self.assertEqual(gui.normalize_process_return_code(0xC000013A), -1073741510)
@@ -117,6 +208,48 @@ class ParserTests(unittest.TestCase):
         for command in accepted:
             with self.subTest(command=command):
                 self.assertTrue(gui.parse_line(command).is_command)
+
+    def test_queue_ignores_destination_only_gallery_dl_templates(self):
+        text = (
+            'gallery-dl -d "F:\\Rips\\Download\\artist" '
+            'https://www.pixiv.net/en/users/123\n'
+            'gallery-dl -d "F:\\Rips\\Download\\riria"   \n'
+        )
+
+        jobs = gui.parse_text_database(text)
+
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0].url, "https://www.pixiv.net/en/users/123")
+
+    def test_queue_keeps_gallery_dl_input_file_commands_without_inline_url(self):
+        commands = (
+            'gallery-dl -d "F:\\Rips\\Download\\batch" -i urls.txt',
+            'gallery-dl --input-file=urls.txt',
+            'gallery-dl -Icommented-urls.txt',
+            'gallery-dl -x -',
+            'gallery-dl oauth:pixiv',
+        )
+
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertIsNotNone(gui.parse_line(command))
+
+    def test_queue_ignores_input_file_option_without_a_value(self):
+        self.assertIsNone(gui.parse_line("gallery-dl --input-file"))
+        self.assertIsNone(gui.parse_line("gallery-dl --input-file="))
+
+    def test_empty_attached_input_file_does_not_hide_later_source(self):
+        commands = (
+            "gallery-dl --input-file= https://target.example/gallery",
+            "gallery-dl --input-file-comment= https://target.example/gallery",
+            "gallery-dl --input-file-delete= https://target.example/gallery",
+        )
+
+        for command in commands:
+            with self.subTest(command=command):
+                job = gui.parse_line(command)
+                self.assertIsNotNone(job)
+                self.assertEqual(job.url, "https://target.example/gallery")
 
     def test_rejects_arbitrary_module_launcher(self):
         job = gui.parse_line("malware -m gallery_dl https://example.com/a")
@@ -158,6 +291,19 @@ class ParserTests(unittest.TestCase):
         self.assertIn("-dD:/Attached", command)
         self.assertNotIn("D:/GUI Default", command)
 
+    @unittest.skipUnless(os.name == "nt", "Windows destination normalization")
+    def test_windows_destination_drops_unusable_trailing_space(self):
+        job = gui.parse_line(
+            'gallery-dl -d "F:\\Rips\\Download\\DokiDoMiki " '
+            "https://example.com/a"
+        )
+
+        command = make_worker(output_dir="D:/GUI Default").build_command(job)
+
+        destination_index = command.index("-d") + 1
+        self.assertEqual(command[destination_index], "F:\\Rips\\Download\\DokiDoMiki")
+        self.assertEqual(job.dest, "F:\\Rips\\Download\\DokiDoMiki")
+
     def test_destination_like_option_value_is_not_treated_as_output(self):
         job = gui.parse_line(
             'gallery-dl --exec "-d" https://example.com/a'
@@ -165,6 +311,19 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(job.dest, "-")
         command = make_worker(output_dir="D:/GUI Default").build_command(job)
         self.assertIn("D:/GUI Default", command)
+
+    def test_destination_normalization_does_not_reinterpret_other_option_values(self):
+        commands = (
+            "gallery-dl --exec -d https://example.com/gallery.",
+            "gallery-dl --header -D https://example.com/gallery.",
+        )
+
+        for source in commands:
+            with self.subTest(source=source):
+                job = gui.parse_line(source)
+                command = make_worker(output_dir="").build_command(job)
+
+                self.assertIn("https://example.com/gallery.", command)
 
     def test_proxy_url_is_not_selected_as_job_url(self):
         job = gui.parse_line(
@@ -199,6 +358,82 @@ class ParserTests(unittest.TestCase):
                     gui.parse_line(command).url,
                     "https://target.example/gallery/123",
                 )
+
+    def test_new_gallery_dl_option_values_are_not_selected_as_targets(self):
+        commands = (
+            "gallery-dl -a https://agent.example/value "
+            "https://target.example/gallery/123",
+            "gallery-dl --cache-file https://cache.example/db "
+            "https://target.example/gallery/123",
+            'gallery-dl --config-json \'{"callback":"https://config.example/hook"}\' '
+            "https://target.example/gallery/123",
+            "gallery-dl --Print-to-file id https://logs.example/output "
+            "https://target.example/gallery/123",
+            "gallery-dl --file-filter https://filter.example/value "
+            "https://target.example/gallery/123",
+        )
+
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(
+                    gui.parse_line(command).url,
+                    "https://target.example/gallery/123",
+                )
+
+    def test_option_value_only_command_is_ignored_as_a_template(self):
+        self.assertIsNone(
+            gui.parse_line("gallery-dl --cache-file https://cache.example/db")
+        )
+
+    def test_variadic_list_extractor_values_are_not_download_sources(self):
+        commands = (
+            "gallery-dl --list-extractors pixiv "
+            "https://target.example/not-a-download",
+            "gallery-dl --list-extractors pixiv -- "
+            "https://target.example/not-a-download",
+            "gallery-dl -i urls.txt --list-extractors pixiv",
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertIsNone(gui.parse_line(command))
+
+    def test_url_parser_tracks_all_installed_options_that_consume_values(self):
+        from gallery_dl import option
+
+        missing: list[str] = []
+        for action in option.build_parser()._actions:
+            if not action.option_strings or action.nargs == 0:
+                continue
+            missing.extend(
+                flag
+                for flag in action.option_strings
+                if flag not in gui.GALLERY_DL_OPTION_VALUE_COUNTS
+            )
+
+        self.assertEqual(missing, [])
+
+        variadic = {
+            flag
+            for action in option.build_parser()._actions
+            if action.nargs in {"*", "+"}
+            for flag in action.option_strings
+        }
+        self.assertEqual(variadic, gui.GALLERY_DL_VARIADIC_VALUE_FLAGS)
+        wrong_arity = []
+        for action in option.build_parser()._actions:
+            if (
+                not action.option_strings
+                or action.nargs == 0
+                or action.nargs in {"*", "+"}
+            ):
+                continue
+            expected = 1 if action.nargs is None else int(action.nargs)
+            wrong_arity.extend(
+                (flag, gui.GALLERY_DL_OPTION_VALUE_COUNTS[flag], expected)
+                for flag in action.option_strings
+                if gui.GALLERY_DL_OPTION_VALUE_COUNTS[flag] != expected
+            )
+        self.assertEqual(wrong_arity, [])
 
     def test_windows_reserved_tag_becomes_safe_folder_name(self):
         self.assertEqual(gui.safe_filename("CON"), "_CON")
@@ -250,6 +485,20 @@ class ParserTests(unittest.TestCase):
             chmod.assert_called_once()
             self.assertEqual(chmod.call_args.args[1], previous_mode)
             self.assertEqual(path.read_text(encoding="utf-8"), "new")
+
+    def test_atomic_writes_use_distinct_temporary_files_per_call(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "session.json"
+            temporary_paths = []
+            with patch(
+                "gallery_dl_app.core.os.replace",
+                side_effect=lambda source, _target: temporary_paths.append(Path(source)),
+            ):
+                gui.atomic_write_text(path, "first", encoding="utf-8")
+                gui.atomic_write_text(path, "second", encoding="utf-8")
+
+        self.assertEqual(len(temporary_paths), 2)
+        self.assertNotEqual(temporary_paths[0], temporary_paths[1])
 
 
 class CommandBuilderTests(unittest.TestCase):
@@ -321,6 +570,48 @@ class CommandBuilderTests(unittest.TestCase):
             redacted[6],
             f"https://example.com/file?access_token={gui.REDACTED}&item=42",
         )
+
+    def test_preview_redacts_secrets_nested_inside_option_values(self):
+        argv = [
+            "gallery-dl",
+            "--config-json",
+            '{"password":"json-secret"}',
+            "--exec",
+            "notify --password callback-secret",
+            "https://example.com",
+        ]
+
+        rendered = " ".join(gui.redact_sensitive_argv(argv))
+
+        self.assertNotIn("json-secret", rendered)
+        self.assertNotIn("callback-secret", rendered)
+        self.assertIn(gui.REDACTED, rendered)
+
+        attached_long = gui.redact_sensitive_argv([
+            "gallery-dl",
+            '--option=extractor.safe={"password":"nested-long-secret"}',
+        ])[1]
+        attached_short = gui.redact_sensitive_argv([
+            "gallery-dl",
+            '-oextractor.safe={"password":"nested-short-secret"}',
+        ])[1]
+        self.assertNotIn("nested-long-secret", attached_long)
+        self.assertNotIn("nested-short-secret", attached_short)
+        self.assertTrue(attached_long.startswith("--option="))
+        self.assertTrue(attached_short.startswith("-oextractor.safe="))
+
+    def test_structured_secret_redaction_handles_escaped_quotes(self):
+        samples = (
+            r'{"password":"prefix\"double-tail-secret"}',
+            r"{'password':'prefix\'single-tail-secret'}",
+            r'--config-json={"password":"prefix\"config-tail-secret"}',
+        )
+
+        for source in samples:
+            with self.subTest(source=source):
+                redacted = gui.redact_sensitive_text(source)
+                self.assertNotIn("tail-secret", redacted)
+                self.assertIn(gui.REDACTED, redacted)
 
     def test_signed_url_credentials_are_redacted_without_false_positive_keys(self):
         signed_urls = [
@@ -434,6 +725,19 @@ class CommandBuilderTests(unittest.TestCase):
         self.assertNotIn("still being typed", redacted)
         self.assertTrue(redacted.endswith(gui.REDACTED))
 
+    def test_redaction_hides_secrets_in_python_argv_representations(self):
+        sources = [
+            "Command ['gallery-dl', '--password', 'list-secret'] timed out",
+            'Command ["gallery-dl", "--api-key=assigned-secret"] failed',
+            "Command ['gallery-dl', '-pattached-secret'] failed",
+            "Command ['gallery-dl', '-o', 'oauth-token=option-secret'] failed",
+        ]
+        for source in sources:
+            with self.subTest(source=source):
+                redacted = gui.redact_sensitive_text(source)
+                self.assertNotIn("secret", redacted.replace(gui.REDACTED, ""))
+                self.assertIn(gui.REDACTED, redacted)
+
     def test_database_redaction_preserves_metadata_and_hides_secrets(self):
         source = (
             "# Project\n#@notes keep\n"
@@ -503,8 +807,121 @@ class CommandBuilderTests(unittest.TestCase):
                 self.assertEqual(gui.sanitize_spreadsheet_cell(value), "'" + value)
         self.assertEqual(gui.sanitize_spreadsheet_cell("https://example.com"), "https://example.com")
 
+    def test_formula_escape_round_trip_does_not_leave_apostrophe_argument(self):
+        for value in ("\t--simulate", "\r--simulate"):
+            with self.subTest(value=value):
+                command = gui.build_raw_command_from_columns({
+                    "url": "https://example.com/a",
+                    "extra_args": gui.sanitize_spreadsheet_cell(value),
+                })
+                argv = gui.split_command(command)
+                self.assertIn("--simulate", argv)
+                self.assertNotIn("'", argv)
+
 
 class DownloadComposerTests(unittest.TestCase):
+    def test_oauth_target_accepts_only_picker_sites_and_requires_mastodon_instance(self):
+        self.assertEqual(composer_oauth_target("pixiv"), "oauth:pixiv")
+        self.assertEqual(
+            composer_oauth_target("mastodon", "https://mastodon.social/"),
+            "oauth:mastodon:https://mastodon.social/",
+        )
+        with self.assertRaisesRegex(ValueError, "supported OAuth site"):
+            composer_oauth_target("pixvi")
+        with self.assertRaisesRegex(ValueError, "instance"):
+            composer_oauth_target("mastodon")
+        with self.assertRaisesRegex(ValueError, "hostname or URL"):
+            composer_oauth_target("mastodon", "https://user:pass@mastodon.social/callback?x=1")
+
+    def test_per_site_catalog_combines_general_and_extractor_specific_options(self):
+        pixiv = {item.key: item for item in config_option_definitions("pixiv")}
+        kemono = {item.key: item for item in config_option_definitions("kemono")}
+        reddit = {item.key: item for item in config_option_definitions("reddit")}
+
+        self.assertEqual(pixiv["archive"].scope, "general")
+        self.assertEqual(pixiv["ugoira"].scope, "site")
+        self.assertEqual(pixiv["include"].value_type, "json")
+        self.assertIn("duplicates", kemono)
+        self.assertIn("archives-format", kemono)
+        self.assertIn("client-id", reddit)
+        self.assertTrue(reddit["client-id"].sensitive)
+        self.assertGreater(len(config_option_definitions("pixiv")), 30)
+        twitter = {item.key: item for item in config_option_definitions("twitter")}
+        self.assertEqual((twitter["replies"].value_type, twitter["replies"].default), ("boolean", True))
+
+    def test_config_editor_applies_general_and_site_edits_and_real_removals(self):
+        original = {
+            "extractor": {
+                "retries": 4,
+                "unknown-global": "keep",
+                "pixiv": {
+                    "metadata": False,
+                    "refresh-token": "remove-me",
+                    "unknown-site": "keep",
+                },
+            },
+            "downloader": {"part": True},
+        }
+        result = apply_config_editor_drafts(
+            original,
+            general_overrides={"timeout": 45},
+            site_overrides={"pixiv": {"metadata": True}},
+            general_removals={"retries"},
+            site_removals={"pixiv": {"refresh-token"}},
+        )
+
+        self.assertEqual(result["extractor"]["timeout"], 45)
+        self.assertNotIn("retries", result["extractor"])
+        self.assertIs(result["extractor"]["pixiv"]["metadata"], True)
+        self.assertNotIn("refresh-token", result["extractor"]["pixiv"])
+        self.assertEqual(result["extractor"]["unknown-global"], "keep")
+        self.assertEqual(result["extractor"]["pixiv"]["unknown-site"], "keep")
+        self.assertEqual(result["downloader"], {"part": True})
+
+    def test_site_archive_gui_builds_current_gallery_dl_keys(self):
+        options = site_archive_options(
+            "E:/RIPS/Database/kemono.sqlite3",
+            duplicates=False,
+            archive_format=r"{service}{user}{id}\_{num}",
+        )
+
+        self.assertEqual(options["archive"], "E:/RIPS/Database/kemono.sqlite3")
+        self.assertIs(options["duplicates"], False)
+        self.assertEqual(options["archive-format"], "{service}{user}{id}_{num}")
+
+    def test_reddit_gui_uses_oauth_specific_user_agent_key(self):
+        options = reddit_site_options("client-id-value", "Python:Downloader:v1.01 (by /u/user)")
+
+        self.assertEqual(options["client-id"], "client-id-value")
+        self.assertEqual(options["user-agent-oauth"], "Python:Downloader:v1.01 (by /u/user)")
+        self.assertNotIn("user-agent", options)
+
+    def test_pixiv_gui_builds_requested_non_secret_options(self):
+        options = pixiv_site_options(
+            include=["background", "artworks", "avatar", "novel-user"],
+            embeds=True,
+            covers=True,
+            full_series=True,
+            metadata=True,
+            ugoira="original",
+        )
+
+        self.assertEqual(options["include"], ["background", "artworks", "avatar", "novel-user"])
+        self.assertIs(options["embeds"], True)
+        self.assertEqual(options["ugoira"], "original")
+
+    def test_advanced_site_option_parser_is_typed_and_rejects_invalid_json(self):
+        self.assertIs(parse_typed_config_value("false", "boolean"), False)
+        self.assertEqual(parse_typed_config_value("42", "integer"), 42)
+        self.assertEqual(parse_typed_config_value('["a", "b"]', "json"), ["a", "b"])
+        self.assertIsNone(parse_typed_config_value("", "null"))
+        with self.assertRaisesRegex(ValueError, "valid JSON"):
+            parse_typed_config_value("[broken", "json")
+
+    def test_bounded_config_integer_handles_overflowing_json_number(self):
+        self.assertEqual(_bounded_int(1e309, 0, 99), 0)
+        self.assertEqual(_bounded_int(-1e309, 5, 99), 5)
+
     def test_json_config_reader_accepts_utf8_bom(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "config.json"
@@ -846,6 +1263,117 @@ class DuplicateTests(unittest.TestCase):
 
 
 class WorkerSafetyTests(unittest.TestCase):
+    def test_worker_sanitizes_malformed_service_policy_values(self):
+        worker = make_worker(
+            service_policy={"example": {"delay": "broken", "retries": ["broken"]}},
+        )
+        job = gui.DownloadJob(
+            raw="https://example.com/a",
+            is_command=False,
+            url="https://example.com/a",
+            service="example",
+            ident="-",
+            dest="-",
+        )
+
+        worker.apply_service_delay(job)
+        command = worker.build_command(job)
+
+        self.assertNotIn("--retries", command)
+
+    def test_worker_uses_home_relative_config_file(self):
+        with tempfile.TemporaryDirectory() as home:
+            config = Path(home) / "gallery-dl" / "config.json"
+            config.parent.mkdir()
+            config.write_text("{}", encoding="utf-8")
+            with patch.dict(
+                os.environ,
+                {"HOME": home, "USERPROFILE": home},
+            ):
+                command = make_worker(
+                    config_path="~/gallery-dl/config.json",
+                    output_dir="",
+                ).build_command(gui.parse_line("https://example.com/a"))
+
+        config_index = command.index("--config")
+        self.assertEqual(command[config_index + 1], str(config))
+
+    def test_probe_timeout_redacts_credentials_from_error_signal(self):
+        worker = gui.CommandProbeWorker(
+            "gallery-dl",
+            ["--password", "probe-secret"],
+            timeout=1,
+        )
+        completed = []
+        worker.done.connect(lambda *values: completed.append(values))
+        process = MagicMock()
+        process.pid = 123
+        process.poll.return_value = None
+        process.communicate.side_effect = [
+            subprocess.TimeoutExpired(
+                ["gallery-dl", "--password", "probe-secret"],
+                1,
+            ),
+            ("", ""),
+        ]
+
+        with (
+            patch("gallery_dl_app.workers.subprocess.Popen", return_value=process),
+            patch("gallery_dl_app.workers.IS_WINDOWS", True),
+            patch("gallery_dl_app.workers.os.kill"),
+        ):
+            worker.run()
+
+        self.assertEqual(len(completed), 1)
+        self.assertNotIn("probe-secret", completed[0][2])
+        self.assertIn(gui.REDACTED, completed[0][2])
+
+    def test_probe_redaction_does_not_replace_short_secret_substrings(self):
+        worker = gui.CommandProbeWorker(
+            "gallery-dl",
+            ["--password", "a"],
+            timeout=1,
+        )
+        completed = []
+        worker.done.connect(lambda *values: completed.append(values))
+        process = MagicMock()
+        process.pid = 123
+        process.poll.return_value = None
+        process.communicate.side_effect = [
+            subprocess.TimeoutExpired(["gallery-dl", "--password", "a"], 1),
+            ("", ""),
+        ]
+
+        with (
+            patch("gallery_dl_app.workers.subprocess.Popen", return_value=process),
+            patch("gallery_dl_app.workers.IS_WINDOWS", True),
+            patch("gallery_dl_app.workers.os.kill"),
+        ):
+            worker.run()
+
+        self.assertEqual(len(completed), 1)
+        self.assertIn("gallery-dl", completed[0][2])
+        self.assertIn(gui.REDACTED, completed[0][2])
+
+    def test_probe_preserves_both_stdout_and_stderr_diagnostics(self):
+        worker = gui.CommandProbeWorker("gallery-dl", ["--version"])
+        completed = []
+        worker.done.connect(lambda *values: completed.append(values))
+        process = MagicMock()
+        process.communicate.return_value = (
+            "startup warning\n",
+            "fatal dependency error\n",
+        )
+        process.returncode = 2
+
+        with patch("gallery_dl_app.workers.subprocess.Popen", return_value=process):
+            worker.run()
+
+        self.assertEqual(len(completed), 1)
+        self.assertIn("startup warning", completed[0][0])
+        self.assertIn("fatal dependency error", completed[0][0])
+        self.assertEqual(completed[0][1], 2)
+
     def test_finished_run_discards_unclaimed_stopped_queue_items(self):
         task_queue = queue.Queue()
         task_queue.put((0, gui.parse_line("https://example.com/a")))
@@ -1070,6 +1598,50 @@ class WorkerSafetyTests(unittest.TestCase):
             self.assertEqual(archive.read_bytes(), b"existing archive")
             self.assertEqual(list(Path(folder).glob(".creator.zip.*.tmp")), [])
 
+    def test_zip_postprocess_uses_distinct_temporary_files_per_call(self):
+        with tempfile.TemporaryDirectory() as folder:
+            destination = Path(folder) / "creator"
+            destination.mkdir()
+            (destination / "image.jpg").write_bytes(b"image")
+            worker = make_worker(compress_enabled=True)
+            job = gui.parse_line(
+                f'gallery-dl -d "{destination}" https://example.com/a'
+            )
+            temporary_paths = []
+            with patch(
+                "gallery_dl_app.workers.os.replace",
+                side_effect=lambda source, _target: temporary_paths.append(Path(source)),
+            ):
+                worker.maybe_compress(job)
+                worker.maybe_compress(job)
+
+        self.assertEqual(len(temporary_paths), 2)
+        self.assertNotEqual(temporary_paths[0], temporary_paths[1])
+
+    def test_7z_postprocess_uses_distinct_temporary_files_per_call(self):
+        with tempfile.TemporaryDirectory() as folder:
+            destination = Path(folder) / "creator"
+            destination.mkdir()
+            (destination / "image.jpg").write_bytes(b"image")
+            worker = make_worker(compress_enabled=True, compress_format="7z")
+            job = gui.parse_line(
+                f'gallery-dl -d "{destination}" https://example.com/a'
+            )
+            process = MagicMock()
+            process.communicate.return_value = ("", "")
+            process.returncode = 0
+            with (
+                patch("gallery_dl_app.workers.shutil.which", return_value="7z"),
+                patch("gallery_dl_app.workers.subprocess.Popen", return_value=process) as popen,
+                patch("gallery_dl_app.workers.os.replace"),
+            ):
+                worker.maybe_compress(job)
+                worker.maybe_compress(job)
+
+        temporary_paths = [Path(call.args[0][3]) for call in popen.call_args_list]
+        self.assertEqual(len(temporary_paths), 2)
+        self.assertNotEqual(temporary_paths[0], temporary_paths[1])
+
     def test_postprocess_failure_marks_completed_download_as_failed(self):
         with tempfile.TemporaryDirectory() as folder:
             destination = Path(folder) / "creator"
@@ -1132,6 +1704,45 @@ class WorkerSafetyTests(unittest.TestCase):
 
 
 class SpreadsheetImportTests(unittest.TestCase):
+    def test_xlsx_rejects_hostile_declared_worksheet_dimensions(self):
+        for max_row, max_column, label in (
+            (gui.MAX_QUEUE_SOURCE_ROWS + 1, 1, "rows"),
+            (1, 16_384, "columns"),
+            (10_000, 256, "cells"),
+        ):
+            with self.subTest(label=label):
+                workbook = MagicMock()
+                workbook.active.max_row = max_row
+                workbook.active.max_column = max_column
+                with (
+                    patch("gallery_dl_app.queue_controller.validate_xlsx_archive"),
+                    patch("openpyxl.load_workbook", return_value=workbook),
+                    self.assertRaisesRegex(ValueError, "worksheet|dimension|safety"),
+                ):
+                    QueueControllerMixin().read_xlsx_as_commands("hostile.xlsx")
+
+                workbook.active.iter_rows.assert_not_called()
+                workbook.close.assert_called_once()
+
+    def test_headerless_xlsx_flattens_embedded_newlines_in_command_cell(self):
+        import openpyxl
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "multiline.xlsx"
+            workbook = openpyxl.Workbook()
+            sheet = workbook.active
+            sheet.append(["https://example.com/a\n--simulate"])
+            workbook.save(path)
+            workbook.close()
+
+            text = QueueControllerMixin().read_xlsx_as_commands(str(path))
+
+        jobs = gui.parse_text_database(text)
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(
+            gui.split_command(jobs[0].raw),
+            ["https://example.com/a", "--simulate"],
+        )
     def test_csv_limits_disabled_source_rows_during_conversion(self):
         source = "url,enabled\nhttps://example.com/a,false\nhttps://example.com/b,false\n"
         with tempfile.TemporaryDirectory() as folder:
@@ -1251,6 +1862,80 @@ class SpreadsheetImportTests(unittest.TestCase):
 
 
 class SystemPathValidationTests(unittest.TestCase):
+    def test_command_preview_redacts_secrets_from_builder_exceptions(self):
+        harness = MagicMock()
+        harness._rebuild_from_text.return_value = True
+        harness.jobs = [gui.parse_line("https://example.com/a")]
+        harness.final_command_for_job.side_effect = RuntimeError(
+            "Command ['gallery-dl', '--password', 'dialog-secret'] failed"
+        )
+
+        SystemToolsMixin.command_preview(harness)
+
+        message = harness.show_scroll_message.call_args.args[1]
+        self.assertNotIn("dialog-secret", message)
+        self.assertIn(gui.REDACTED, message)
+
+    def test_open_selected_destination_expands_home_directory(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            expected = Path(home) / "chosen-output"
+            expected.mkdir()
+            previous_cwd = os.getcwd()
+            try:
+                os.chdir(cwd)
+                harness = MagicMock()
+                harness.selected_indices.return_value = [0]
+                harness.jobs = [MagicMock(dest="~/chosen-output")]
+                with (
+                    patch.dict(os.environ, {"HOME": home, "USERPROFILE": home}),
+                    patch("gallery_dl_app.queue_controller.open_path", return_value=True) as opener,
+                ):
+                    QueueControllerMixin.open_selected_destination(harness)
+            finally:
+                os.chdir(previous_cwd)
+
+        opener.assert_called_once_with(expected)
+        harness.show_compact_message.assert_not_called()
+
+    def test_config_detection_includes_gallery_dl_windows_home_directory(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder) / "home"
+            appdata = Path(folder) / "appdata"
+            expected = home / "gallery-dl" / "config.json"
+            expected.parent.mkdir(parents=True)
+            expected.write_text("{}", encoding="utf-8")
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {"HOME": str(home), "USERPROFILE": str(home), "APPDATA": str(appdata)},
+                ),
+                patch("gallery_dl_app.core.IS_WINDOWS", True),
+            ):
+                detected = gui.detect_config_path()
+
+        self.assertEqual(detected, str(expected))
+
+    def test_open_output_folder_expands_home_like_other_path_actions(self):
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            previous_cwd = os.getcwd()
+            try:
+                os.chdir(cwd)
+                harness = MagicMock()
+                harness.edit_output.text.return_value = "~/chosen-output"
+                with (
+                    patch.dict(os.environ, {"HOME": home, "USERPROFILE": home}),
+                    patch("gallery_dl_app.system_tools.open_path", return_value=True) as opener,
+                ):
+                    SystemToolsMixin.open_output_folder(harness)
+                    expected = Path(home) / "chosen-output"
+                    created = expected.is_dir()
+            finally:
+                os.chdir(previous_cwd)
+
+        opener.assert_called_once_with(expected)
+        self.assertTrue(created)
+
     def test_open_config_rejects_directory_without_opening_it(self):
         with tempfile.TemporaryDirectory() as folder:
             harness = MagicMock()
@@ -1273,7 +1958,110 @@ class SystemPathValidationTests(unittest.TestCase):
         self.assertIn("not a file", harness.show_compact_message.call_args.args[1])
 
 
+class GuideTests(unittest.TestCase):
+    def test_command_guide_uses_options_supported_by_gallery_dl_129(self):
+        guide = AdvancedToolsMixin.gallery_dl_command_guide_text(
+            MagicMock(),
+            "English",
+        )
+
+        for unsupported in (
+            "--date-after",
+            "--date-before",
+            "--post-range",
+            "--child-range",
+            "--tags-whitelist",
+            "--tags-blacklist",
+        ):
+            self.assertNotIn(unsupported, guide)
+        self.assertIn("-o date-min=2026-01-01", guide)
+        self.assertIn("--range 1-20", guide)
+
+
 class ReportExportTests(unittest.TestCase):
+    def test_background_file_task_redacts_exception_before_emitting_signal(self):
+        emitted: list[str] = []
+
+        def fail(_stop_event):
+            raise RuntimeError("--password background-task-secret")
+
+        task = CancellableFileTask(fail)
+        task.failed.connect(emitted.append)
+
+        task.run()
+
+        self.assertEqual(len(emitted), 1)
+        self.assertNotIn("background-task-secret", emitted[0])
+        self.assertIn(gui.REDACTED, emitted[0])
+
+    def test_compact_dialog_redacts_sensitive_message_text(self):
+        harness = MagicMock()
+        harness._ui_translate_text.side_effect = lambda value: value
+        secret_message = "Command --password dialog-boundary-secret failed"
+        with (
+            patch("gallery_dl_app.reports.QDialog"),
+            patch("gallery_dl_app.reports.QVBoxLayout"),
+            patch("gallery_dl_app.reports.QHBoxLayout"),
+            patch("gallery_dl_app.reports.QLabel") as label_class,
+            patch("gallery_dl_app.reports.QPushButton"),
+        ):
+            ReportsMixin.show_compact_message(
+                harness,
+                "Failure",
+                secret_message,
+                "error",
+            )
+
+        rendered = " ".join(
+            str(call.args[0]) for call in label_class.call_args_list if call.args
+        )
+        self.assertNotIn("dialog-boundary-secret", rendered)
+        self.assertIn(gui.REDACTED, rendered)
+
+    def test_scroll_dialog_redacts_sensitive_message_text(self):
+        harness = MagicMock()
+        harness._ui_translate_text.side_effect = lambda value: value
+        secret_message = (
+            "Command --password scroll-boundary-secret failed\n" + "x" * 800
+        )
+        with (
+            patch("gallery_dl_app.reports.QDialog"),
+            patch("gallery_dl_app.reports.QVBoxLayout"),
+            patch("gallery_dl_app.reports.QHBoxLayout"),
+            patch("gallery_dl_app.reports.QLabel"),
+            patch("gallery_dl_app.reports.QPlainTextEdit") as editor_class,
+            patch("gallery_dl_app.reports.QPushButton"),
+        ):
+            ReportsMixin.show_scroll_message(
+                harness,
+                "Failure",
+                secret_message,
+                "error",
+            )
+
+        rendered = editor_class.return_value.setPlainText.call_args.args[0]
+        self.assertNotIn("scroll-boundary-secret", rendered)
+        self.assertIn(gui.REDACTED, rendered)
+
+    def test_preflight_rejects_job_destination_that_is_an_existing_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            destination = Path(folder) / "not-a-folder"
+            destination.write_text("occupied", encoding="utf-8")
+            harness = MagicMock()
+            harness.edit_output.text.return_value = folder
+            harness.jobs = [gui.DownloadJob("url", False, "https://example.com", dest=str(destination))]
+            harness.gdl_cmd = "gallery-dl"
+            harness.spin_workers.value.return_value = 3
+
+            with patch(
+                "gallery_dl_app.reports.QMessageBox.question",
+                return_value=QMessageBox.No,
+            ) as question:
+                allowed = ReportsMixin.run_preflight_audit(harness, [0])
+
+        self.assertFalse(allowed)
+        self.assertIn("not a directory", question.call_args.args[2])
+
     def test_autosave_directory_is_not_moved_as_a_corrupt_file(self):
         with tempfile.TemporaryDirectory() as folder:
             autosave_path = Path(folder) / "autosave_session.json"
@@ -1316,6 +2104,29 @@ class ReportExportTests(unittest.TestCase):
             self.assertFalse(data["output"]["exists"])
             self.assertEqual(Path(data["output"]["capacity_checked_at"]), Path(folder))
 
+    def test_diagnostic_data_redacts_credentials_in_gallery_dl_command(self):
+        harness = MagicMock()
+        harness.edit_output.text.return_value = "."
+        harness.config_path = None
+        harness.gdl_cmd = "python -m gallery_dl --password audit-secret"
+        harness.jobs = []
+        harness.done_indices = set()
+        harness.failed_indices = set()
+        harness.stopped_indices = set()
+        harness.cancelled_indices = set()
+        harness.spin_workers.value.return_value = 3
+        harness.combo_cookies.currentText.return_value = "none"
+        harness.spin_retries.value.return_value = 0
+        harness.audit_mode = False
+        harness.compact_mode = False
+        harness.analyze_log_lines.return_value = {}
+
+        with patch("gallery_dl_app.reports.dependency_status", return_value={}):
+            data = ReportsMixin.diagnostic_data(harness)
+
+        self.assertNotIn("audit-secret", data["gallery_dl_command"])
+        self.assertIn(gui.REDACTED, data["gallery_dl_command"])
+
     def test_text_exports_redact_inline_credentials(self):
         source = (
             "gallery-dl --password export-secret "
@@ -1345,6 +2156,23 @@ class ReportExportTests(unittest.TestCase):
             self.assertIn("https://example.com/a", text)
         self.assertTrue(exported[1].startswith("# Project\n"))
 
+    def test_log_export_redacts_again_at_file_boundary(self):
+        harness = MagicMock()
+        harness.all_log_lines = [
+            "gallery-dl --password log-export-secret https://example.com/a"
+        ]
+        harness._safe_write_file.return_value = True
+
+        with patch(
+            "gallery_dl_app.reports.QFileDialog.getSaveFileName",
+            return_value=("combined_log.txt", ""),
+        ):
+            ReportsMixin.export_logs(harness)
+
+        exported = harness._safe_write_file.call_args.args[1]
+        self.assertNotIn("log-export-secret", exported)
+        self.assertIn(gui.REDACTED, exported)
+
     def test_queue_clipboard_actions_redact_inline_credentials(self):
         source = (
             "gallery-dl --password clipboard-secret "
@@ -1371,6 +2199,24 @@ class ReportExportTests(unittest.TestCase):
 
 
 class BackupTests(unittest.TestCase):
+    def test_backups_use_distinct_temporary_files_per_call(self):
+        with tempfile.TemporaryDirectory() as folder:
+            app_dir = Path(folder) / "app-data"
+            backup_dir = app_dir / "backups"
+            backup_dir.mkdir(parents=True)
+            (app_dir / "session.json").write_text("{}", encoding="utf-8")
+            target = backup_dir / "backup.zip"
+            temporary_paths = []
+            with patch(
+                "gallery_dl_app.reports.os.replace",
+                side_effect=lambda source, _target: temporary_paths.append(Path(source)),
+            ):
+                write_app_data_backup(app_dir, backup_dir, target)
+                write_app_data_backup(app_dir, backup_dir, target)
+
+        self.assertEqual(len(temporary_paths), 2)
+        self.assertNotEqual(temporary_paths[0], temporary_paths[1])
+
     def test_unique_path_does_not_reuse_same_timestamped_name(self):
         with tempfile.TemporaryDirectory() as folder:
             base = Path(folder) / "config.json.bak_20260101_120000"
@@ -1450,6 +2296,65 @@ class BackupTests(unittest.TestCase):
             self.assertEqual(result["largest"][0][0], 14)
 
 
+class DropImportTests(unittest.TestCase):
+    def test_drop_labels_only_successfully_loaded_files(self):
+        with tempfile.TemporaryDirectory() as folder:
+            invalid = Path(folder) / "broken.bin"
+            invalid.write_bytes(b"not text\x00binary")
+            valid = Path(folder) / "working.txt"
+            valid.write_text("https://example.com/a\n", encoding="utf-8")
+
+            invalid_url = MagicMock()
+            invalid_url.toLocalFile.return_value = str(invalid)
+            valid_url = MagicMock()
+            valid_url.toLocalFile.return_value = str(valid)
+            event = MagicMock()
+            event.mimeData.return_value.urls.return_value = [invalid_url, valid_url]
+            harness = MagicMock()
+            harness.active_workers = 0
+
+            AdvancedToolsMixin.dropEvent(harness, event)
+
+        self.assertEqual(harness.current_file, str(valid))
+        harness.lbl_loaded_file.setText.assert_called_once_with("working.txt")
+        self.assertEqual(
+            harness.txt_commands.setPlainText.call_args.args[0],
+            "https://example.com/a",
+        )
+        harness.show_compact_message.assert_called_once()
+        event.acceptProposedAction.assert_called_once_with()
+
+    def test_dry_run_accepts_input_file_and_oauth_commands(self):
+        harness = MagicMock()
+        harness._rebuild_from_text.return_value = True
+        harness.jobs = [
+            gui.parse_line("gallery-dl -i urls.txt"),
+            gui.parse_line("gallery-dl oauth:pixiv"),
+            gui.parse_line("oauth:pixiv"),
+        ]
+        harness.gdl_cmd = "gallery-dl"
+        harness.config_path = None
+        harness.edit_output.text.return_value = ""
+        harness.combo_cookies.currentText.return_value = "none"
+        harness.spin_retries.value.return_value = 0
+        harness.service_policy = {}
+        validator = MagicMock()
+        validator.build_command.side_effect = (
+            ["gallery-dl", "-i", "urls.txt"],
+            ["gallery-dl", "oauth:pixiv"],
+            ["gallery-dl", "oauth:pixiv"],
+        )
+
+        with patch(
+            "gallery_dl_app.advanced_tools.DownloadWorker",
+            return_value=validator,
+        ):
+            AdvancedToolsMixin.dry_run_validator(harness)
+
+        message = harness.show_scroll_message.call_args.args[1]
+        self.assertIn("Problems: 0", message)
+
+
 class SessionTests(unittest.TestCase):
     def test_string_boolean_values_are_not_treated_as_true(self):
         false_values = (False, 0, "0", "false", "NO", "off", "disabled", "")
@@ -1468,6 +2373,51 @@ class SessionTests(unittest.TestCase):
         self.assertTrue(is_restorable_autosave({"commands": "", "workers": 5}))
         self.assertFalse(is_restorable_autosave({}))
         self.assertFalse(is_restorable_autosave([]))
+
+    def test_session_does_not_persist_or_restore_secret_bearing_base_command(self):
+        harness = MagicMock()
+        harness.txt_commands.toPlainText.return_value = "https://example.com/a"
+        harness.gdl_cmd = "python -m gallery_dl --password base-secret"
+        harness.config_path = None
+        harness.current_theme = "dark"
+        harness.help_language = "English"
+        harness.audit_mode = False
+        harness.compact_mode = False
+        harness.notifications_enabled = True
+        harness.service_policy = {}
+        harness.retry_strategy = {}
+        harness.active_account_profile_id = None
+        harness.clipboard_inbox_enabled = False
+        harness.clipboard_allowed_hosts = ""
+        harness.close_to_tray = False
+
+        saved = SystemToolsMixin.session_data(harness)
+
+        self.assertEqual(saved["gdl_cmd"], "")
+        self.assertNotIn("base-secret", repr(saved))
+
+        restore = MagicMock()
+        restore.gdl_cmd = "detected-gallery-dl"
+        restore.config_path = None
+        restore.current_theme = "dark"
+        restore.help_language = "English"
+        restore.audit_mode = False
+        restore.notifications_enabled = False
+        restore.service_policy = {}
+        restore.retry_strategy = {}
+        restore.active_account_profile_id = None
+        restore.clipboard_inbox_enabled = False
+        restore.clipboard_allowed_hosts = ""
+        restore.close_to_tray = False
+        restore.compact_mode = False
+        restore.combo_cookies.findText.return_value = 0
+        restore.combo_archive.findText.return_value = 0
+
+        SystemToolsMixin.apply_session_data(restore, {
+            "commands": "",
+            "gdl_cmd": f"python -m gallery_dl --password {gui.REDACTED}",
+        })
+        self.assertEqual(restore.gdl_cmd, "detected-gallery-dl")
 
     def test_session_does_not_restore_directory_as_gallery_dl_executable(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -1495,6 +2445,28 @@ class SessionTests(unittest.TestCase):
 
         self.assertEqual(harness.gdl_cmd, "detected-gallery-dl")
         self.assertIn("executable is unavailable", harness.append_log.call_args.args[0])
+
+    def test_session_rejects_non_text_core_fields_before_mutating_state(self):
+        for field, value in (
+            ("commands", ["https://example.com/a"]),
+            ("gdl_cmd", {"command": "gallery-dl"}),
+            ("config_path", {"path": "config.json"}),
+            ("output_dir", ["downloads"]),
+        ):
+            with self.subTest(field=field):
+                harness = MagicMock()
+                harness.gdl_cmd = "detected-gallery-dl"
+                harness.config_path = "original-config.json"
+
+                with self.assertRaisesRegex(ValueError, field):
+                    SystemToolsMixin.apply_session_data(
+                        harness,
+                        {"commands": "https://example.com/original", field: value},
+                    )
+
+                self.assertEqual(harness.gdl_cmd, "detected-gallery-dl")
+                self.assertEqual(harness.config_path, "original-config.json")
+                harness.txt_commands.setPlainText.assert_not_called()
 
     def test_version_check_reports_nonzero_return_code_as_failure(self):
         harness = MagicMock()

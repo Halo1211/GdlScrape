@@ -4,7 +4,7 @@ import csv
 import html
 import io
 import os
-import threading
+import tempfile
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Slot
@@ -42,6 +42,7 @@ from .core import (
     APP_DIR,
     MAX_LOG_BLOCKS,
     atomic_write_text,
+    sanitize_spreadsheet_cell,
 )
 from .themes import application_icon
 
@@ -1640,15 +1641,16 @@ Export Template Pack > Edit template > Import Preview > Import database > Comman
 
         Column names match the importer (build_raw_command_from_columns /
         _row_value) so an exported template round-trips cleanly on re-import.
-        Six columns (A-F) align with the width map used in export_xlsx_template.
+        Seven columns (A-G) align with the documented importer schema and the
+        width map used in export_xlsx_template.
         All values are neutral placeholders.
         """
         return [
-            ["URL", "Destination", "Tag", "Enabled", "Extra Args", "Command"],
-            ["https://example.com/user/artist-one", "downloads/ArtistOne", "ArtistOne", "yes", "", ""],
-            ["https://example.com/user/artist-two", "downloads/ArtistTwo", "ArtistTwo", "yes", "--no-check-certificate", ""],
-            ["https://example.com/user/disabled-row", "", "ArtistThree", "no", "", ""],
-            ["", "", "Full command example", "yes", "", 'gallery-dl -d "downloads/ArtistFour" https://example.com/user/artist-four'],
+            ["URL", "Destination", "Extra Args", "Enabled", "Tag", "Notes", "Command"],
+            ["https://example.com/user/artist-one", "downloads/ArtistOne", "", "yes", "ArtistOne", "", ""],
+            ["https://example.com/user/artist-two", "downloads/ArtistTwo", "--no-check-certificate", "yes", "ArtistTwo", "", ""],
+            ["https://example.com/user/disabled-row", "", "", "no", "ArtistThree", "Disabled example", ""],
+            ["", "", "", "yes", "Full command example", "", 'gallery-dl -d "downloads/ArtistFour" https://example.com/user/artist-four'],
         ]
 
     def sample_txt_database(self) -> str:
@@ -1689,13 +1691,42 @@ Export Template Pack > Edit template > Import Preview > Import database > Comman
         if not path:
             return
         try:
-            buffer = io.StringIO(newline="")
-            writer = csv.writer(buffer)
-            writer.writerows(self.sample_csv_rows())
-            atomic_write_text(path, buffer.getvalue(), encoding="utf-8-sig", newline="")
+            atomic_write_text(
+                path,
+                self._csv_template_text(self.sample_csv_rows()),
+                encoding="utf-8-sig",
+                newline="",
+            )
             self.show_compact_message("CSV Template", f"CSV template exported:\n{path}", "info")
         except Exception as exc:
             self.show_compact_message("CSV export failed", str(exc), "error")
+
+    @staticmethod
+    def _csv_template_text(rows) -> str:
+        buffer = io.StringIO(newline="")
+        writer = csv.writer(buffer)
+        writer.writerows(
+            [sanitize_spreadsheet_cell(value) for value in row]
+            for row in rows
+        )
+        return buffer.getvalue()
+
+    @staticmethod
+    def _xlsx_append_literal_row(ws, values) -> None:
+        """Append cells as literal strings instead of inferred formulas."""
+        row_values = list(values)
+        ws.append(row_values)
+        for cell, value in zip(ws[ws.max_row], row_values, strict=False):
+            if isinstance(value, str):
+                # openpyxl infers every string beginning with '=' as a formula,
+                # even when the cell is formatted as Text. Invalid formula-like
+                # README separators then make Microsoft Excel reject the file.
+                cell.data_type = "s"
+
+    @staticmethod
+    def _xlsx_write_text_sheet(ws, text: str) -> None:
+        for line in text.splitlines():
+            UiShellMixin._xlsx_append_literal_row(ws, [line])
 
     @staticmethod
     def _xlsx_write_database_sheet(ws, rows) -> None:
@@ -1713,7 +1744,7 @@ Export Template Pack > Edit template > Import Preview > Import database > Comman
         from openpyxl.styles import Alignment, Font, PatternFill  # type: ignore
 
         for row in rows:
-            ws.append(row)
+            UiShellMixin._xlsx_append_literal_row(ws, row)
 
         # Style only the header row (plain text, never formula-like).
         header_fill = PatternFill("solid", fgColor="1F4E78")
@@ -1728,7 +1759,7 @@ Export Template Pack > Edit template > Import Preview > Import database > Comman
             for cell in row:
                 cell.number_format = "@"
 
-        widths = {"A": 62, "B": 32, "C": 22, "D": 12, "E": 18, "F": 42}
+        widths = {"A": 62, "B": 32, "C": 24, "D": 12, "E": 22, "F": 32, "G": 70}
         for col, width in widths.items():
             ws.column_dimensions[col].width = width
         ws.freeze_panes = "A2"
@@ -1745,17 +1776,22 @@ Export Template Pack > Edit template > Import Preview > Import database > Comman
         a successful save guarantees the destination is always a complete file.
         """
         target = Path(path)
-        tmp = target.with_name(f"{target.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            dir=target.parent,
+        )
+        os.close(descriptor)
+        tmp = Path(temporary_name)
         try:
             wb.save(tmp)
             os.replace(tmp, target)
-        except Exception:
+        finally:
             try:
-                if tmp.exists():
-                    tmp.unlink()
-            except Exception:
+                tmp.unlink(missing_ok=True)
+            except OSError:
                 pass
-            raise
 
     def export_xlsx_template(self) -> None:
         try:
@@ -1773,12 +1809,10 @@ Export Template Pack > Edit template > Import Preview > Import database > Comman
             ws.title = "database"
             self._xlsx_write_database_sheet(ws, self.sample_csv_rows())
             help_ws = wb.create_sheet("README_EN")
-            for line in self.database_help_text("English").splitlines():
-                help_ws.append([line])
+            self._xlsx_write_text_sheet(help_ws, self.database_help_text("English"))
             help_ws.column_dimensions["A"].width = 110
             help_id = wb.create_sheet("README_ID")
-            for line in self.database_help_text("Indonesia").splitlines():
-                help_id.append([line])
+            self._xlsx_write_text_sheet(help_id, self.database_help_text("Indonesia"))
             help_id.column_dimensions["A"].width = 110
             self._xlsx_save_atomic(wb, path)
             self.show_compact_message("XLSX Template", f"XLSX template exported:\n{path}", "info")
@@ -1803,10 +1837,12 @@ Export Template Pack > Edit template > Import Preview > Import database > Comman
             readme_en = base / "README_database_format_EN.md"
             readme_id = base / "README_database_format_ID.md"
             atomic_write_text(txt_path, self.sample_txt_database(), encoding="utf-8")
-            csv_buffer = io.StringIO(newline="")
-            writer = csv.writer(csv_buffer)
-            writer.writerows(self.sample_csv_rows())
-            atomic_write_text(csv_path, csv_buffer.getvalue(), encoding="utf-8-sig", newline="")
+            atomic_write_text(
+                csv_path,
+                self._csv_template_text(self.sample_csv_rows()),
+                encoding="utf-8-sig",
+                newline="",
+            )
             atomic_write_text(readme_en, self.database_help_text("English"), encoding="utf-8")
             atomic_write_text(readme_id, self.database_help_text("Indonesia"), encoding="utf-8")
 
@@ -1825,12 +1861,10 @@ Export Template Pack > Edit template > Import Preview > Import database > Comman
                     ws.title = "database"
                     self._xlsx_write_database_sheet(ws, self.sample_csv_rows())
                     help_ws = wb.create_sheet("README_EN")
-                    for line in self.database_help_text("English").splitlines():
-                        help_ws.append([line])
+                    self._xlsx_write_text_sheet(help_ws, self.database_help_text("English"))
                     help_ws.column_dimensions["A"].width = 110
                     help_id = wb.create_sheet("README_ID")
-                    for line in self.database_help_text("Indonesia").splitlines():
-                        help_id.append([line])
+                    self._xlsx_write_text_sheet(help_id, self.database_help_text("Indonesia"))
                     help_id.column_dimensions["A"].width = 110
                     xlsx_path = base / "gallery_dl_database_template.xlsx"
                     self._xlsx_save_atomic(wb, xlsx_path)

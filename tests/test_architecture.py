@@ -18,12 +18,15 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import gallery_dl_app as package
 from gallery_dl import util as gallery_dl_util
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QStackedWidget,
+    QTableWidget,
     QTabWidget,
 )
 from PySide6.QtGui import QPalette
@@ -43,6 +46,25 @@ class ArchitectureTests(unittest.TestCase):
         metadata = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
         self.assertEqual(metadata["project"]["name"], "gdlscrape")
         self.assertEqual(metadata["project"]["version"], package.__version__)
+        windows_version = Path("packaging/version_info.txt").read_text(encoding="utf-8")
+        self.assertIn("StringStruct('FileVersion', '1.01')", windows_version)
+        self.assertIn("StringStruct('ProductVersion', '1.01')", windows_version)
+
+    def test_packaging_requires_gallery_dl_with_pawchive_support(self):
+        metadata = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+        requirements = Path("requirements.txt").read_text(encoding="utf-8")
+        readme = Path("README.md").read_text(encoding="utf-8")
+
+        self.assertIn("gallery-dl>=1.32.10", metadata["project"]["dependencies"])
+        self.assertIn("gallery-dl>=1.32.10", requirements.splitlines())
+        self.assertIn("gallery-dl`](https://gdl-org.github.io/docs/) 1.32.10 or newer", readme)
+
+    def test_standalone_build_bundles_dynamic_gallery_dl_extractors(self):
+        spec = Path("packaging/GdlScrape.spec").read_text(encoding="utf-8")
+
+        self.assertIn("collect_submodules", spec)
+        self.assertIn('collect_submodules("gallery_dl.extractor")', spec)
+        self.assertIn("hiddenimports=gallery_dl_hiddenimports", spec)
 
     def test_responsibilities_live_in_separate_mixins(self):
         self.assertIn("_build_ui", UiShellMixin.__dict__)
@@ -84,8 +106,10 @@ class ArchitectureTests(unittest.TestCase):
         try:
             window.show()
             app.processEvents()
-            self.assertEqual(window.windowTitle(), "GdlScrape v1.0")
-            self.assertEqual(package.__version__, "1.0")
+            self.assertEqual(window.windowTitle(), "GdlScrape v1.01")
+            self.assertEqual(package.__version__, "1.01")
+            self.assertEqual(window.lbl_app_version.text(), "v1.01  •  DESKTOP")
+            self.assertGreater(window._stable_table_font().pointSizeF(), 0)
             self.assertEqual(window.lbl_title.text(), "GDL")
             self.assertEqual(window.lbl_subtitle.text(), "SCRAPE")
             self.assertEqual(len(window._shortcuts), 6)
@@ -495,6 +519,41 @@ class ArchitectureTests(unittest.TestCase):
             window.close()
             app.processEvents()
 
+    def test_managed_runtime_reports_unusable_runtime_directory(self):
+        with patch.object(ReportsMixin, "_load_autosave_silently", lambda _self: None):
+            app, window = package.create_application([])
+        errors = []
+        original_hook = sys.excepthook
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                runtime_path = Path(folder) / "runtime"
+                runtime_path.write_text("occupied", encoding="utf-8")
+                page = ManagementMixin._build_runtime_tab(window)
+                install = next(
+                    button
+                    for button in page.findChildren(QPushButton)
+                    if button.text() == "Install / Update Managed Runtime"
+                )
+                sys.excepthook = lambda *details: errors.append(details)
+                with (
+                    patch("gallery_dl_app.management.SECURE_RUNTIME_DIR", runtime_path),
+                    patch(
+                        "gallery_dl_app.management.QMessageBox.question",
+                        return_value=QMessageBox.Yes,
+                    ),
+                    patch.object(window, "show_compact_message") as show_message,
+                ):
+                    install.click()
+                    app.processEvents()
+
+                self.assertEqual(errors, [])
+                show_message.assert_called_once()
+                self.assertEqual(show_message.call_args.args[2], "error")
+        finally:
+            sys.excepthook = original_hook
+            window.close()
+            app.processEvents()
+
     def test_scheduled_account_does_not_get_global_browser_cookie_override(self):
         with (
             patch.object(ReportsMixin, "_load_autosave_silently", lambda _self: None),
@@ -547,6 +606,55 @@ class ArchitectureTests(unittest.TestCase):
         captured = {}
 
         def inspect_dialog(dialog):
+            if dialog.objectName() == "siteConfigStudio":
+                studio_tabs = dialog.findChild(QTabWidget, "siteConfigTabs")
+                captured["site_studio_tabs"] = [
+                    studio_tabs.tabText(index) for index in range(studio_tabs.count())
+                ]
+                captured["site_studio_fields"] = {
+                    name: dialog.findChild(QLineEdit, name) is not None
+                    for name in (
+                        "siteArchivePath",
+                        "redditClientId",
+                        "redditOAuthUserAgent",
+                        "pixivRefreshToken",
+                        "pixivPhpsessid",
+                        "advancedSiteOptionKey",
+                    )
+                }
+                scope_picker = dialog.findChild(QComboBox, "configScopeCombo")
+                site_picker = dialog.findChild(QComboBox, "configEditorSiteCombo")
+                captured["detailed_config_editor"] = (
+                    scope_picker is not None
+                    and site_picker is not None
+                    and not site_picker.isEditable()
+                    and dialog.findChild(QTableWidget, "configOptionTable") is not None
+                )
+                option_key = dialog.findChild(QComboBox, "configOptionKey")
+                option_value = dialog.findChild(QComboBox, "configOptionValue")
+                option_key.setCurrentIndex(option_key.findData("retries"))
+                option_value.setEditText("7")
+                dialog.findChild(QPushButton, "setConfigOption").click()
+                scope_picker.setCurrentIndex(scope_picker.findData("site"))
+                site_picker.setCurrentText("pixiv")
+                option_key.setCurrentIndex(option_key.findData("metadata"))
+                option_value.setEditText("true")
+                dialog.findChild(QPushButton, "setConfigOption").click()
+                dialog.findChild(QLineEdit, "siteArchivePath").setText(
+                    "E:/RIPS/Database/kemono.sqlite3"
+                )
+                dialog.findChild(QPushButton, "applySiteArchive").click()
+                dialog.findChild(QLineEdit, "redditClientId").setText(
+                    "private-test-client-id"
+                )
+                dialog.findChild(QLineEdit, "redditOAuthUserAgent").setText(
+                    "Python:GdlScrape:v1.01 (by /u/test)"
+                )
+                dialog.findChild(QPushButton, "applyRedditSettings").click()
+                captured["site_studio_preview"] = dialog.findChild(
+                    QPlainTextEdit, "siteConfigDraftPreview"
+                ).toPlainText()
+                return QDialog.Rejected
             tab_sets = [
                 [widget.tabText(index) for index in range(widget.count())]
                 for widget in dialog.findChildren(QTabWidget)
@@ -564,10 +672,21 @@ class ArchitectureTests(unittest.TestCase):
                 button.text() == "Start OAuth"
                 for button in dialog.findChildren(QPushButton)
             )
+            oauth_picker = dialog.findChild(QComboBox, "oauthSiteCombo")
+            captured["oauth_picker"] = (
+                oauth_picker is not None
+                and not oauth_picker.isEditable()
+                and oauth_picker.count() == 7
+                and dialog.findChild(QLineEdit, "oauthMastodonInstance") is not None
+            )
+            captured["has_site_studio"] = dialog.findChild(
+                QPushButton, "siteConfigStudioButton"
+            ) is not None
             captured["masked_secrets"] = sum(
                 field.echoMode() == QLineEdit.Password
                 for field in dialog.findChildren(QLineEdit)
             )
+            dialog.findChild(QPushButton, "siteConfigStudioButton").click()
             return QDialog.Rejected
 
         try:
@@ -581,6 +700,21 @@ class ArchitectureTests(unittest.TestCase):
             self.assertTrue(captured["has_steps"])
             self.assertEqual(captured["auth_methods"], 5)
             self.assertTrue(captured["has_oauth"])
+            self.assertTrue(captured["oauth_picker"])
+            self.assertTrue(captured["has_site_studio"])
+            self.assertEqual(
+                captured["site_studio_tabs"],
+                ["All Options", "Archive", "Reddit", "Pixiv", "Advanced", "Safe Preview"],
+            )
+            self.assertTrue(all(captured["site_studio_fields"].values()))
+            self.assertTrue(captured["detailed_config_editor"])
+            self.assertIn("E:/RIPS/Database/kemono.sqlite3", captured["site_studio_preview"])
+            self.assertIn('"duplicates": false', captured["site_studio_preview"])
+            self.assertIn('"user-agent-oauth"', captured["site_studio_preview"])
+            self.assertIn('"client-id": "<hidden>"', captured["site_studio_preview"])
+            self.assertIn('"retries": 7', captured["site_studio_preview"])
+            self.assertIn('"metadata": true', captured["site_studio_preview"])
+            self.assertNotIn("private-test-client-id", captured["site_studio_preview"])
             self.assertGreaterEqual(captured["masked_secrets"], 2)
         finally:
             window.close()

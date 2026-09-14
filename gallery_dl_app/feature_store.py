@@ -8,10 +8,11 @@ jobs, runs, schedules, and user-facing library records.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sqlite3
 import time
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Iterable, Iterator, Sequence
 
@@ -20,6 +21,8 @@ from .core import (
     HISTORY_FILE,
     HISTORY_MAX_BYTES,
     MAX_LOG_LINE_CHARS,
+    REDACTED,
+    normalize_process_return_code,
     redact_sensitive_text,
     redact_sensitive_database_text,
     safe_bool,
@@ -30,6 +33,24 @@ from .core import (
 
 
 FEATURE_DB = APP_DIR / "library.sqlite3"
+
+
+def _finite_timestamp(value: object, *, field: str) -> float:
+    """Return a SQLite-safe timestamp or reject NaN/infinity explicitly."""
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{field} must be a finite timestamp") from exc
+    if not math.isfinite(timestamp):
+        raise ValueError(f"{field} must be a finite timestamp")
+    return timestamp
+
+
+def _nullable_return_code(value: object) -> int | None:
+    """Normalize persisted process codes while preserving an absent value."""
+    if value is None or value == "":
+        return None
+    return normalize_process_return_code(value)
 
 
 def _recent_bounded_jsonl_lines(path: Path) -> Iterator[str]:
@@ -50,14 +71,17 @@ def _recent_bounded_jsonl_lines(path: Path) -> Iterator[str]:
             return fragment
 
         if start:
+            source_file.seek(start - 1)
+            starts_at_line_boundary = source_file.read(1) == b"\n"
             source_file.seek(start)
-            # The tail normally begins inside a row. Drain that partial row in
-            # bounded chunks; an unlimited readline could allocate the giant
-            # row this migration is specifically trying to avoid.
-            while True:
-                fragment = read_fragment()
-                if not fragment or fragment.endswith((b"\n", b"\r")):
-                    break
+            if not starts_at_line_boundary:
+                # The tail normally begins inside a row. Drain that partial row
+                # in bounded chunks; an unlimited readline could allocate the
+                # giant row this migration is specifically trying to avoid.
+                while True:
+                    fragment = read_fragment()
+                    if not fragment or fragment.endswith((b"\n", b"\r")):
+                        break
         while True:
             raw = read_fragment()
             if not raw:
@@ -214,6 +238,8 @@ class FeatureStore:
                     cookie_source TEXT NOT NULL DEFAULT '',
                     secret_key TEXT NOT NULL DEFAULT 'password',
                     secret_ref TEXT NOT NULL DEFAULT '',
+                    oauth_instance TEXT NOT NULL DEFAULT '',
+                    cache_file TEXT NOT NULL DEFAULT '',
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL
                 );
@@ -222,11 +248,24 @@ class FeatureStore:
             columns = {str(row[1]) for row in db.execute("PRAGMA table_info(library_entries)")}
             if "command" not in columns:
                 db.execute("ALTER TABLE library_entries ADD COLUMN command TEXT NOT NULL DEFAULT ''")
+            if "account_profile_id" not in columns:
+                db.execute("ALTER TABLE library_entries ADD COLUMN account_profile_id INTEGER")
             schedule_columns = {
                 str(row[1]) for row in db.execute("PRAGMA table_info(schedules)")
             }
             if "account_profile_id" not in schedule_columns:
                 db.execute("ALTER TABLE schedules ADD COLUMN account_profile_id INTEGER")
+            account_columns = {
+                str(row[1]) for row in db.execute("PRAGMA table_info(account_profiles)")
+            }
+            if "oauth_instance" not in account_columns:
+                db.execute(
+                    "ALTER TABLE account_profiles ADD COLUMN oauth_instance TEXT NOT NULL DEFAULT ''"
+                )
+            if "cache_file" not in account_columns:
+                db.execute(
+                    "ALTER TABLE account_profiles ADD COLUMN cache_file TEXT NOT NULL DEFAULT ''"
+                )
 
     def _meta(self, key: str) -> str | None:
         with self._connect() as db:
@@ -255,34 +294,35 @@ class FeatureStore:
             return 0
         if path.is_file():
             try:
-                lines = _recent_bounded_jsonl_lines(path)
-                with self._connect() as db:
-                    for line in lines:
-                        try:
-                            record = json.loads(line)
-                        except (TypeError, ValueError):
-                            continue
-                        if not isinstance(record, dict) or not record.get("url"):
-                            continue
-                        db.execute(
-                            """INSERT INTO history(
-                                occurred_at, status, service, item_id, url,
-                                return_code, error_type, downloaded, skipped, message
-                            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                            (
-                                str(record.get("time") or ""),
-                                str(record.get("status") or "unknown"),
-                                str(record.get("service") or "-"),
-                                str(record.get("id") or "-"),
-                                redact_sensitive_text(str(record.get("url"))),
-                                record.get("rc"),
-                                str(record.get("error_type") or "unknown"),
-                                safe_int(record.get("downloaded"), 0, 0),
-                                safe_int(record.get("skipped"), 0, 0),
-                                redact_sensitive_text(str(record.get("message") or "")),
-                            ),
-                        )
-                        imported += 1
+                with closing(_recent_bounded_jsonl_lines(path)) as lines:
+                    with self._connect() as db:
+                        for line in lines:
+                            try:
+                                record = json.loads(line)
+                            except (TypeError, ValueError):
+                                continue
+                            if not isinstance(record, dict) or not record.get("url"):
+                                continue
+                            return_code = _nullable_return_code(record.get("rc"))
+                            db.execute(
+                                """INSERT INTO history(
+                                    occurred_at, status, service, item_id, url,
+                                    return_code, error_type, downloaded, skipped, message
+                                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                (
+                                    str(record.get("time") or ""),
+                                    str(record.get("status") or "unknown"),
+                                    str(record.get("service") or "-"),
+                                    str(record.get("id") or "-"),
+                                    redact_sensitive_text(str(record.get("url"))),
+                                    return_code,
+                                    str(record.get("error_type") or "unknown"),
+                                    safe_int(record.get("downloaded"), 0, 0),
+                                    safe_int(record.get("skipped"), 0, 0),
+                                    redact_sensitive_text(str(record.get("message") or "")),
+                                ),
+                            )
+                            imported += 1
             except OSError:
                 # Leave the marker unset so transient filesystem errors can be
                 # retried at the next startup instead of breaking initialization.
@@ -303,7 +343,7 @@ class FeatureStore:
                     str(record.get("service") or "-"),
                     str(record.get("id") or "-"),
                     redact_sensitive_text(str(record.get("url") or "")),
-                    record.get("rc"),
+                    _nullable_return_code(record.get("rc")),
                     str(record.get("error_type") or "unknown"),
                     safe_int(record.get("downloaded"), 0, 0),
                     safe_int(record.get("skipped"), 0, 0),
@@ -492,16 +532,24 @@ class FeatureStore:
 
     def save_schedule(self, values: dict[str, object], schedule_id: int | None = None) -> int:
         now = time.time()
+        command_text = redact_sensitive_database_text(
+            str(values.get("command_text") or "")
+        )
+        next_run_value = values.get("next_run_at")
+        next_run_at = _finite_timestamp(
+            now if next_run_value in (None, "") else next_run_value,
+            field="next_run_at",
+        )
         payload = (
             str(values.get("name") or "Scheduled download"),
-            redact_sensitive_database_text(str(values.get("command_text") or "")),
+            command_text,
             str(values.get("frequency") or "daily"),
             safe_int(values.get("interval_minutes"), 1440, 1, 10080),
             str(values.get("time_of_day") or "02:00"),
             str(values.get("weekdays") or "0,1,2,3,4,5,6"),
-            1 if safe_bool(values.get("enabled"), True) else 0,
+            1 if safe_bool(values.get("enabled"), True) and REDACTED not in command_text else 0,
             safe_int(values.get("account_profile_id"), 0, 0) or None,
-            float(values.get("next_run_at") or now),
+            next_run_at,
             now,
         )
         with self._connect() as db:
@@ -538,12 +586,17 @@ class FeatureStore:
         return [dict(row) for row in rows]
 
     def advance_schedule(self, schedule_id: int, next_run_at: float, ran_at: float | None = None) -> None:
+        next_timestamp = _finite_timestamp(next_run_at, field="next_run_at")
+        ran_timestamp = _finite_timestamp(
+            time.time() if ran_at is None else ran_at,
+            field="ran_at",
+        )
         with self._connect() as db:
             db.execute(
                 "UPDATE schedules SET next_run_at=?, last_run_at=?, updated_at=? WHERE id=?",
                 (
-                    float(next_run_at),
-                    float(ran_at if ran_at is not None else time.time()),
+                    next_timestamp,
+                    ran_timestamp,
                     time.time(),
                     int(schedule_id),
                 ),
@@ -551,10 +604,19 @@ class FeatureStore:
 
     def defer_schedule(self, schedule_id: int, next_run_at: float) -> None:
         """Move a failed dispatch forward without claiming that it ran."""
+        next_timestamp = _finite_timestamp(next_run_at, field="next_run_at")
         with self._connect() as db:
             db.execute(
                 "UPDATE schedules SET next_run_at=?, updated_at=? WHERE id=?",
-                (float(next_run_at), time.time(), int(schedule_id)),
+                (next_timestamp, time.time(), int(schedule_id)),
+            )
+
+    def set_schedule_enabled(self, schedule_id: int, enabled: bool) -> None:
+        """Enable or disable one schedule without changing its run timestamps."""
+        with self._connect() as db:
+            db.execute(
+                "UPDATE schedules SET enabled=?, updated_at=? WHERE id=?",
+                (1 if enabled else 0, time.time(), int(schedule_id)),
             )
 
     def delete_schedules(self, ids: Iterable[int]) -> None:
@@ -574,6 +636,8 @@ class FeatureStore:
             str(values.get("cookie_source") or ""),
             str(values.get("secret_key") or "password"),
             str(values.get("secret_ref") or ""),
+            str(values.get("oauth_instance") or "").strip(),
+            str(values.get("cache_file") or "").strip(),
             now,
         )
         if not payload[0] or not payload[1]:
@@ -583,15 +647,16 @@ class FeatureStore:
                 db.execute(
                     """UPDATE account_profiles SET name=?, site=?, auth_kind=?,
                        username=?, cookie_source=?, secret_key=?, secret_ref=?,
-                       updated_at=? WHERE id=?""",
+                       oauth_instance=?, cache_file=?, updated_at=? WHERE id=?""",
                     (*payload, int(account_id)),
                 )
                 return int(account_id)
             cursor = db.execute(
                 """INSERT INTO account_profiles(
                     name, site, auth_kind, username, cookie_source,
-                    secret_key, secret_ref, created_at, updated_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    secret_key, secret_ref, oauth_instance, cache_file,
+                    created_at, updated_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (*payload[:-1], now, payload[-1]),
             )
             return int(cursor.lastrowid)
@@ -609,15 +674,34 @@ class FeatureStore:
         return dict(row) if row else None
 
     def delete_accounts(self, ids: Iterable[int]) -> list[str]:
-        values = [int(item_id) for item_id in ids]
+        values = sorted({int(item_id) for item_id in ids})
         if not values:
             return []
         placeholders = ",".join("?" for _ in values)
         with self._connect() as db:
             rows = db.execute(
-                f"SELECT secret_ref FROM account_profiles WHERE id IN ({placeholders})", values
+                # ``placeholders`` contains only one literal ``?`` per parsed integer;
+                # account IDs remain bound parameters.
+                f"SELECT secret_ref FROM account_profiles WHERE id IN ({placeholders})",  # nosec B608
+                values,
             ).fetchall()
-            db.execute(f"DELETE FROM account_profiles WHERE id IN ({placeholders})", values)
+            now = time.time()
+            db.execute(
+                f"""UPDATE library_entries SET account_profile_id=NULL, updated_at=?
+                    WHERE account_profile_id IN ({placeholders})""",  # nosec B608
+                [now, *values],
+            )
+            # A schedule pinned to a deleted login must not silently run as a
+            # public job. Disable it until the user assigns another profile.
+            db.execute(
+                f"""UPDATE schedules SET account_profile_id=NULL, enabled=0, updated_at=?
+                    WHERE account_profile_id IN ({placeholders})""",  # nosec B608
+                [now, *values],
+            )
+            db.execute(
+                f"DELETE FROM account_profiles WHERE id IN ({placeholders})",  # nosec B608
+                values,
+            )
         return [str(row[0]) for row in rows if row[0]]
 
 

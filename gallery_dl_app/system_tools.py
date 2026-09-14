@@ -35,6 +35,7 @@ from .core import (
     APP_DIR,
     AUTOSAVE_FILE,
     IS_WINDOWS,
+    REDACTED,
     _strip_wrapping_quotes,
     app_data_dir,
     atomic_write_text,
@@ -46,7 +47,9 @@ from .core import (
     read_text_safely,
     redact_sensitive_database_text,
     redact_sensitive_argv,
+    redact_sensitive_text,
     safe_bool,
+    safe_expand_path,
     safe_int,
     sanitize_service_policy,
     split_command,
@@ -145,7 +148,9 @@ class SystemToolsMixin:
                 preview = " ".join(quote_arg_for_preview(x) for x in redact_sensitive_argv(cmd))
                 lines.append(f"#{i+1} [{job.service}] {preview}")
             except Exception as exc:
-                lines.append(f"#{i+1}: ERROR: {exc}")
+                lines.append(
+                    f"#{i+1}: ERROR: {redact_sensitive_text(str(exc))}"
+                )
         if len(self.jobs) > 50:
             lines.append(f"... {len(self.jobs)-50} more")
         self.show_scroll_message("Command Preview", "Final commands that will be executed:\n\n" + "\n".join(lines), "info")
@@ -1183,7 +1188,7 @@ Notes:
             self.show_compact_message("Config", "Config exists. Non-JSON config was not parsed.", "info")
 
     def open_output_folder(self) -> None:
-        path = Path(self.edit_output.text().strip() or ".")
+        path = safe_expand_path(self.edit_output.text() or ".")
         try:
             path.mkdir(parents=True, exist_ok=True)
         except Exception as exc:
@@ -1260,10 +1265,16 @@ Notes:
             self.show_compact_message("Load session failed", f"Session file cannot be loaded:\n{exc}", "error")
 
     def session_data(self) -> dict:
+        persisted_gdl_cmd = self.gdl_cmd or ""
+        if redact_sensitive_text(persisted_gdl_cmd) != persisted_gdl_cmd:
+            # The executable field is not an authentication store. Omitting a
+            # secret-bearing compound command keeps autosave safe and lets the
+            # next launch retain its freshly detected local gallery-dl path.
+            persisted_gdl_cmd = ""
         return {
             "schema": 4,
             "commands": redact_sensitive_database_text(self.txt_commands.toPlainText()),
-            "gdl_cmd": self.gdl_cmd,
+            "gdl_cmd": persisted_gdl_cmd,
             "config_path": self.config_path,
             "output_dir": self.edit_output.text(),
             "workers": self.spin_workers.value(),
@@ -1289,12 +1300,27 @@ Notes:
         # Schema note: fields are read defensively (missing keys -> defaults,
         # combo values via findText, policy via sanitize), so schema 1-3
         # session/profile files all apply safely without a migration table.
-        commands_text = str(data.get("commands") or "")
+        if not isinstance(data, dict):
+            raise ValueError("Session data must be a JSON object")
+        # Validate fields that become commands or filesystem paths before any
+        # widget/state mutation.  Stringifying containers produces plausible-
+        # looking but broken commands/paths and can leave a partially applied
+        # session when a later Qt setText() rejects the value.
+        for field in ("commands", "gdl_cmd", "config_path", "output_dir"):
+            value = data.get(field)
+            if value is not None and not isinstance(value, str):
+                raise ValueError(f"Session field {field} must be text")
+        commands_text = data.get("commands") or ""
         # Validate before changing any settings so an oversized/malformed
         # session cannot partially apply and then leave stale queue state.
         parse_text_database(commands_text)
-        saved_cmd = str(data.get("gdl_cmd") or "").strip()
-        if saved_cmd:
+        saved_cmd = (data.get("gdl_cmd") or "").strip()
+        if REDACTED in saved_cmd:
+            self.append_log(
+                "[session] ignored a gallery-dl command whose credentials "
+                "were removed; keeping the detected local command"
+            )
+        elif saved_cmd:
             # A session can carry a gallery-dl path from another machine, a
             # removed install, or even a directory selected by malformed data.
             # Only restore concrete paths that still name a file. Bare PATH
