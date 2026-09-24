@@ -464,6 +464,8 @@ class DownloadWorker(QThread):
             with self._lock:
                 self.current_job_idx = idx
             downloaded = skipped = errors = warnings = 0
+            last_progress_log = time.monotonic()
+            last_progress_total = 0
             tail_lines: list[str] = []
             # Keep the real URL in job.raw/build_command, but never surface
             # obvious access tokens or signed query values in worker status,
@@ -563,6 +565,15 @@ class DownloadWorker(QThread):
                     elif self.re_download.search(text):
                         downloaded += 1
                     self.log.emit(self.worker_id, text)
+                    progress_total = downloaded + skipped + errors + warnings
+                    now = time.monotonic()
+                    if progress_total > last_progress_total and (progress_total - last_progress_total >= 25 or now - last_progress_log >= 30):
+                        self.log.emit(
+                            self.worker_id,
+                            f"[PROGRESS] [{idx+1}] downloaded={downloaded} skipped={skipped} errors={errors} warnings={warnings}",
+                        )
+                        last_progress_total = progress_total
+                        last_progress_log = now
 
                 # Always close the stdout pipe so its file descriptor is not
                 # leaked across jobs, and so a terminated process with a full
@@ -646,7 +657,7 @@ class DownloadWorker(QThread):
                 with self._lock:
                     self.current_job_idx = None
                 if status == "done":
-                    self.log.emit(self.worker_id, f"[DONE] [{idx+1}] Done")
+                    self.log.emit(self.worker_id, f"[DONE] [{idx+1}] downloaded={downloaded} skipped={skipped} errors={errors} warnings={warnings}")
                 elif status == "failed":
                     self.log.emit(self.worker_id, f"[FAILED] [{idx+1}] Failed ({classify_error(message)})")
                 elif status == "cancelled":

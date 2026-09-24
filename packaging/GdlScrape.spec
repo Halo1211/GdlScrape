@@ -11,7 +11,7 @@ incompatible_icu = re.compile(r"^icu(?:uc|in|dt).*\.dll$", re.IGNORECASE)
 gallery_dl_hiddenimports = collect_submodules("gallery_dl.extractor")
 
 a = Analysis(
-    [str(project_root / "gdlscrape.py")],
+    [str(project_root / "gdlscrape.py"), str(project_root / "packaging" / "gallery_dl_cli.py")],
     pathex=[str(project_root)],
     binaries=[],
     datas=[(str(project_root / "gallery_dl_app" / "assets"), "gallery_dl_app/assets")],
@@ -33,18 +33,19 @@ a.binaries = [
 ]
 
 pyz = PYZ(a.pure)
+gui_scripts = [entry for entry in a.scripts if entry[0] != "gallery_dl_cli"]
+cli_scripts = [entry for entry in a.scripts if entry[0] != "gdlscrape"]
 
 exe = EXE(
     pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
+    gui_scripts,
     [],
+    exclude_binaries=True,
     name="GdlScrape",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,
@@ -55,4 +56,25 @@ exe = EXE(
     entitlements_file=None,
     version=str(project_root / "packaging" / "version_info.txt"),
     icon=[str(project_root / "packaging" / "gdlscrape.ico")],
+)
+
+gallery_dl_exe = EXE(
+    pyz,
+    cli_scripts,
+    [],
+    exclude_binaries=True,
+    name="gallery-dl",
+    console=True,
+    upx=False,
+    version=str(project_root / "packaging" / "version_info.txt"),
+    icon=[str(project_root / "packaging" / "gdlscrape.ico")],
+)
+
+coll = COLLECT(
+    exe,
+    gallery_dl_exe,
+    a.binaries,
+    a.datas,
+    name="GdlScrape",
+    upx=False,
 )

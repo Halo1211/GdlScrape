@@ -25,7 +25,7 @@ IS_MACOS = platform.system() == "Darwin"
 
 APP_NAME = "GdlScrape"
 
-APP_VERSION = "1.01"
+APP_VERSION = "1.0.2"
 
 APP_DIR = Path.home() / ".gallery_dl_gui_dashboard"
 
@@ -468,9 +468,15 @@ def command_executable_available(command: str | None) -> bool:
     return shutil.which(executable) is not None
 
 def find_gallery_dl() -> str | None:
+    if getattr(sys, "frozen", False):
+        bundled = Path(sys.executable).resolve().with_name("gallery-dl.exe" if IS_WINDOWS else "gallery-dl")
+        if bundled.is_file():
+            return str(bundled)
     exe = shutil.which("gallery-dl") or shutil.which("gallery-dl.exe")
     if exe:
         return exe
+    if getattr(sys, "frozen", False):
+        return None
     try:
         completed = subprocess.run(
             [sys.executable, "-m", "gallery_dl", "--version"],
@@ -743,7 +749,9 @@ def _row_value(row: dict[str, str], *names: str) -> str:
         # ``' ...`` and leaves a stray apostrophe argv element in the command.
         if len(value) >= 2 and value[0] == "'" and value[1] in "=+-@\t\r":
             value = value[1:]
-        value = " ".join(value.split())
+        # Only flatten row breaks. Whitespace inside a quoted command argument
+        # (especially a Windows destination path) is significant.
+        value = re.sub(r"[\r\n]+", " ", value).strip()
         lower[str(key).strip().lower()] = value
     for name in names:
         value = lower.get(name.lower())
@@ -1157,6 +1165,74 @@ def redact_oauth_output(text: str) -> str:
         lambda match: match.group(1) + REDACTED,
         value,
     )
+
+
+class OAuthOutputRedactor:
+    """Show OAuth instructions as they arrive without showing issued tokens.
+
+    gallery-dl prints a token label, a blank line, then one or more bare token
+    values. Process complete lines so a value split between QProcess reads can
+    never appear before its label has been classified. The no-newline input
+    prompt is the sole fragment released early.
+    """
+
+    _token_heading = re.compile(
+        r"^\s*Your\s+.*(?:token|secret|key).*\b(?:is|are)\s*$", re.I
+    )
+    _input_prompt = re.compile(
+        r"^\s*(?:code|pin|verifier|verification code|authorization code)\s*:\s*$",
+        re.I,
+    )
+
+    def __init__(self) -> None:
+        self._pending = ""
+        self._redacting_values = False
+        self._masked_value = False
+        self._discarding_line = False
+
+    def _line(self, line: str) -> str:
+        content = line.rstrip("\r\n")
+        ending = line[len(content):]
+        if self._token_heading.match(content):
+            self._redacting_values = True
+            self._masked_value = False
+            return redact_sensitive_text(content) + ending
+        if self._redacting_values:
+            if not content.strip():
+                if self._masked_value:
+                    self._redacting_values = False
+                return ending
+            self._masked_value = True
+            return REDACTED + ending
+        return redact_sensitive_text(content) + ending
+
+    def feed(self, chunk: str) -> str:
+        self._pending += str(chunk)
+        output: list[str] = []
+        while "\n" in self._pending:
+            line, self._pending = self._pending.split("\n", 1)
+            if self._discarding_line:
+                self._discarding_line = False
+                output.append("[OAuth output line omitted]\n")
+            else:
+                output.append(self._line(line + "\n"))
+        if self._input_prompt.fullmatch(self._pending):
+            output.append(redact_sensitive_text(self._pending))
+            self._pending = ""
+        elif len(self._pending) > MAX_LOG_LINE_CHARS:
+            # A helper that never emits a newline must not grow GUI memory or
+            # make us reveal an incomplete token while trying to show progress.
+            self._pending = ""
+            self._discarding_line = True
+        return "".join(output)
+
+    def finish(self) -> str:
+        if self._discarding_line:
+            self._pending = ""
+            self._discarding_line = False
+            return "[OAuth output line omitted]"
+        pending, self._pending = self._pending, ""
+        return self._line(pending) if pending else ""
 
 
 def redact_sensitive_database_text(text: str) -> str:
@@ -1584,4 +1660,4 @@ def dependency_status() -> dict[str, bool]:
         "7z/7za/7zz": (shutil.which("7z") is not None or shutil.which("7za") is not None or shutil.which("7zz") is not None),
     }
 
-__all__ = ['IS_WINDOWS', 'IS_MACOS', 'APP_NAME', 'APP_VERSION', 'APP_DIR', 'HISTORY_FILE', 'HISTORY_MAX_BYTES', 'HISTORY_TRIM_BYTES', 'AUTOSAVE_FILE', 'BACKUP_DIR', 'PROFILES_DIR', 'SETTINGS_FILE', 'MAX_LOG_BLOCKS', 'MAX_LOG_LINES', 'MAX_LOG_LINE_CHARS', 'STOP_GRACE_SECONDS', 'MAX_IMPORT_BYTES', 'MAX_QUEUE_JOBS', 'MAX_COMMAND_LINE_CHARS', 'MAX_QUEUE_SOURCE_ROWS', 'REDACTED', 'SECRET_VALUE_FLAGS', 'SECRET_OPTION_KEYS', 'MANAGED_AUTH_KEYS', 'GALLERY_DL_OPTION_VALUE_COUNTS', 'GALLERY_DL_VARIADIC_VALUE_FLAGS', 'OFFICIAL_GALLERY_DL_LINKS', 'OFFICIAL_GALLERY_DL_DEPENDENCIES', 'app_data_dir', 'timestamp_slug', 'unique_path', 'human_size', 'safe_expand_path', 'atomic_write_text', 'is_false_value', 'safe_bool', 'is_sensitive_option_key', 'append_extra_args_to_command', 'append_extra_args_to_database_text', 'command_with_destination', 'looks_like_database_entry', 'sanitize_service_policy', 'read_text_safely', 'validate_cookies_txt', '_strip_wrapping_quotes', '_windows_cmdline_to_argv', 'split_command', 'command_string_to_argv', 'command_executable_available', 'find_gallery_dl', 'detect_config_path', 'open_path', 'parse_url_meta', 'extract_destination', 'normalized_job_argv', 'find_exact_duplicate_groups', 'parse_text_database', '_row_value', 'redact_sensitive_argv', 'redact_sensitive_text', 'redact_oauth_output', 'redact_sensitive_database_text', 'quote_arg_for_preview', 'build_raw_command_from_columns', 'csv_rows_first_column_fallback', 'classify_error', 'ensure_no_option', 'safe_int', 'normalize_process_return_code', 'safe_filename', 'sanitize_spreadsheet_cell', '_gdl_basename', '_is_python_launcher', 'is_gallery_dl_invocation', 'strip_gallery_dl_invocation', '_extract_url_from_tokens', 'parse_line', 'dependency_status']
+__all__ = ['IS_WINDOWS', 'IS_MACOS', 'APP_NAME', 'APP_VERSION', 'APP_DIR', 'HISTORY_FILE', 'HISTORY_MAX_BYTES', 'HISTORY_TRIM_BYTES', 'AUTOSAVE_FILE', 'BACKUP_DIR', 'PROFILES_DIR', 'SETTINGS_FILE', 'MAX_LOG_BLOCKS', 'MAX_LOG_LINES', 'MAX_LOG_LINE_CHARS', 'STOP_GRACE_SECONDS', 'MAX_IMPORT_BYTES', 'MAX_QUEUE_JOBS', 'MAX_COMMAND_LINE_CHARS', 'MAX_QUEUE_SOURCE_ROWS', 'REDACTED', 'SECRET_VALUE_FLAGS', 'SECRET_OPTION_KEYS', 'MANAGED_AUTH_KEYS', 'GALLERY_DL_OPTION_VALUE_COUNTS', 'GALLERY_DL_VARIADIC_VALUE_FLAGS', 'OFFICIAL_GALLERY_DL_LINKS', 'OFFICIAL_GALLERY_DL_DEPENDENCIES', 'app_data_dir', 'timestamp_slug', 'unique_path', 'human_size', 'safe_expand_path', 'atomic_write_text', 'is_false_value', 'safe_bool', 'is_sensitive_option_key', 'append_extra_args_to_command', 'append_extra_args_to_database_text', 'command_with_destination', 'looks_like_database_entry', 'sanitize_service_policy', 'read_text_safely', 'validate_cookies_txt', '_strip_wrapping_quotes', '_windows_cmdline_to_argv', 'split_command', 'command_string_to_argv', 'command_executable_available', 'find_gallery_dl', 'detect_config_path', 'open_path', 'parse_url_meta', 'extract_destination', 'normalized_job_argv', 'find_exact_duplicate_groups', 'parse_text_database', '_row_value', 'redact_sensitive_argv', 'redact_sensitive_text', 'redact_oauth_output', 'OAuthOutputRedactor', 'redact_sensitive_database_text', 'quote_arg_for_preview', 'build_raw_command_from_columns', 'csv_rows_first_column_fallback', 'classify_error', 'ensure_no_option', 'safe_int', 'normalize_process_return_code', 'safe_filename', 'sanitize_spreadsheet_cell', '_gdl_basename', '_is_python_launcher', 'is_gallery_dl_invocation', 'strip_gallery_dl_invocation', '_extract_url_from_tokens', 'parse_line', 'dependency_status']

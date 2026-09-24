@@ -2,6 +2,34 @@
 
 All notable changes to GdlScrape are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0.2] - 2026-09-24
+
+### Added
+
+- Dedicated Config Builder with a searchable offline reference of 645 gallery-dl configuration paths and typed editing for concrete paths.
+- Guided URL recipes for booru pages, including Hypnohub, and several other gallery sites; generated URLs are checked against the bundled extractor.
+- Per-worker progress messages and log filters.
+- Site-specific OAuth instructions and a GUI callback relay for DeviantArt, Flickr, Reddit, SmugMug, Tumblr, and Mastodon.
+
+### Fixed
+
+- The active-worker count now updates as a replacement worker starts after a completed job.
+- Controls and dialog icons use bundled graphics so their appearance does not depend on an installed symbol font.
+- Hypnohub and Paheal directory templates fall back to identifiers when tag metadata is unavailable.
+- The Config Builder option catalog is now included in Python wheel and source distributions.
+- OAuth site editing no longer raises an exception while the site name is incomplete.
+- OAuth responses stay bound to the site that started the flow even if a site or profile picker changes before completion.
+- OAuth callback relay avoids the system proxy and rejects URLs too long for gallery-dl's local listener.
+- Full Reference drafts are saved before Composer jobs use them, then cleared after a successful config save.
+- URL recipes accept leading `@` in X/Twitter handles and Flickr account IDs containing `@`.
+- Pixiv configuration cards now expand with the dialog width instead of leaving a wide unused column.
+- The Windows release now bundles gallery-dl in a one-folder package and does not use UPX compression.
+
+### Changed
+
+- Packaged builds use their included gallery-dl executable; the runtime controls explain the active executable.
+- Database destination overrides and their precedence are described in the interface.
+
 ## [1.01] - 2026-09-14
 
 ### Added

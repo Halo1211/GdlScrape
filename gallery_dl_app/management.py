@@ -14,8 +14,9 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
-from PySide6.QtCore import QProcess, QTime, QTimer, Qt
+from PySide6.QtCore import QProcess, QTime, QTimer, Qt, QUrl
 from PySide6.QtGui import QAction, QTextCursor
+from PySide6.QtNetwork import QNetworkAccessManager, QNetworkProxy, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -49,6 +50,7 @@ from shiboken6 import isValid
 from .core import (
     APP_DIR,
     MANAGED_AUTH_KEYS,
+    OAuthOutputRedactor,
     REDACTED,
     append_extra_args_to_database_text,
     atomic_write_text,
@@ -57,7 +59,7 @@ from .core import (
     parse_text_database,
     quote_arg_for_preview,
     read_text_safely,
-    redact_oauth_output,
+    redact_oauth_output as redact_oauth_output,
     redact_sensitive_database_text,
     redact_sensitive_text,
     safe_int,
@@ -66,6 +68,7 @@ from .core import (
 from .feature_logic import build_filter_expression, next_schedule_time, parse_help_options
 from .feature_store import FeatureStore
 from .secure_vault import SecretVault
+from .oauth_flow import local_oauth_callback_url, oauth_flow_guidance
 
 
 SECURE_RUNTIME_DIR = APP_DIR / "runtime"
@@ -214,7 +217,9 @@ def account_action_argv(
         raise ValueError("The account profile has no private cache path")
     argv.extend(["--cache-file", cache])
     if action == "oauth":
-        argv.append(oauth_target(site, oauth_instance))
+        # QProcess stdin is a pipe rather than a TTY. gallery-dl otherwise
+        # refuses Pixiv's input("code: ") prompt before the GUI can send it.
+        argv.extend(["-o", "extractor.input=true", oauth_target(site, oauth_instance)])
     elif action == "status":
         argv.append("--cache-status")
     elif action == "show":
@@ -669,7 +674,8 @@ class ManagementMixin:
         root = QVBoxLayout(dialog)
         intro = QLabel(
             "Persistent archive library, recurring schedules, Clipboard Inbox, secure account profiles, "
-            "installed-version options, and an isolated gallery-dl runtime."
+            + ("installed-version options, and the included gallery-dl." if getattr(sys, "frozen", False)
+               else "installed-version options, and an isolated gallery-dl runtime.")
         )
         intro.setWordWrap(True)
         intro.setObjectName("subtle")
@@ -1158,8 +1164,9 @@ class ManagementMixin:
         oauth_response = QLineEdit()
         oauth_response.setObjectName("accountOAuthResponse")
         oauth_response.setEchoMode(QLineEdit.Password)
-        oauth_response.setPlaceholderText("Pixiv only: paste the code or complete callback URL")
-        send_oauth_response = QPushButton("Send Pixiv Code")
+        oauth_response.setPlaceholderText("Paste Pixiv code or a complete OAuth callback URL")
+        send_oauth_response = QPushButton("Send response")
+        send_oauth_response.setObjectName("accountOAuthSend")
         send_oauth_response.setEnabled(False)
         oauth_form.addWidget(QLabel("Mastodon instance"), 0, 0)
         oauth_form.addWidget(oauth_instance, 0, 1)
@@ -1238,10 +1245,13 @@ class ManagementMixin:
         current_ref: list[str] = [""]
         current_cache: list[str] = [""]
         process_action: list[str] = [""]
-        process_buffer: list[str] = [""]
+        process_oauth_site = [""]
+        oauth_stream = [OAuthOutputRedactor()]
 
         process = QProcess(page)
         process.setProcessChannelMode(QProcess.MergedChannels)
+        oauth_network = QNetworkAccessManager(page)
+        oauth_network.setProxy(QNetworkProxy(QNetworkProxy.NoProxy))
 
         def selected_site() -> str:
             index = site.currentIndex()
@@ -1522,32 +1532,29 @@ class ManagementMixin:
             data = bytes(process.readAllStandardOutput()).decode("utf-8", errors="replace")
             if data:
                 if process_action[0] == "OAuth":
-                    # gallery-dl prints newly-issued tokens as bare lines.
-                    # Buffer the complete OAuth transcript so chunk boundaries
-                    # can never expose a token before its label arrives.
-                    process_buffer[0] += data
+                    append_process_output(oauth_stream[0].feed(data))
                 else:
                     append_process_output(data)
 
         def process_finished(exit_code: int, _status) -> None:
             read_process_output()
-            if process_action[0] == "OAuth" and process_buffer[0]:
-                append_process_output(redact_oauth_output(process_buffer[0]))
-                process_buffer[0] = ""
+            if process_action[0] == "OAuth":
+                append_process_output(oauth_stream[0].finish())
             oauth_button.setEnabled(True)
             stop_button.setEnabled(False)
             send_oauth_response.setEnabled(False)
+            process_oauth_site[0] = ""
             label = process_action[0] or "Account action"
             append_process_output(f"\n{label} finished with exit code {exit_code}.\n")
             refresh()
 
         def process_error(_error) -> None:
-            if process_action[0] == "OAuth" and process_buffer[0]:
-                append_process_output(redact_oauth_output(process_buffer[0]))
-                process_buffer[0] = ""
+            if process_action[0] == "OAuth":
+                append_process_output(oauth_stream[0].finish())
             oauth_button.setEnabled(True)
             stop_button.setEnabled(False)
             send_oauth_response.setEnabled(False)
+            process_oauth_site[0] = ""
             append_process_output("\nCould not start gallery-dl: " + process.errorString() + "\n")
 
         def run_account_action(action: str) -> None:
@@ -1596,21 +1603,16 @@ class ManagementMixin:
                 "clear_expired": "Expired cache cleanup",
                 "vacuum": "Cache optimization",
             }.get(action, action)
-            process_buffer[0] = ""
+            process_oauth_site[0] = str(record["site"]) if action == "oauth" else ""
+            oauth_stream[0] = OAuthOutputRedactor()
             process_output.clear()
             if action == "oauth":
                 append_process_output(
                     "Starting gallery-dl OAuth. Complete authorization in the browser that opens.\n"
                     "Do not share authorization codes or token output.\n\n"
                 )
-                if str(record["site"]) == "pixiv":
-                    append_process_output(
-                        "Pixiv: open Developer Tools (F12) → Network before logging in. "
-                        "Select the final callback request, copy its code parameter or full "
-                        "callback URL, paste it above, then press Send Pixiv Code. The code "
-                        "expires quickly.\n\n"
-                    )
-                send_oauth_response.setEnabled(str(record["site"]) == "pixiv")
+                append_process_output(oauth_flow_guidance(str(record["site"])) + "\n\n")
+                send_oauth_response.setEnabled(True)
             else:
                 append_process_output(process_action[0] + "…\n\n")
             oauth_button.setEnabled(False)
@@ -1627,9 +1629,28 @@ class ManagementMixin:
                 or process_action[0] != "OAuth"
             ):
                 return
-            process.write((value + "\n").encode("utf-8"))
+            category = process_oauth_site[0]
+            if category == "pixiv":
+                process.write((value + "\n").encode("utf-8"))
+                oauth_response.clear()
+                append_process_output("Pixiv code sent to gallery-dl.\n")
+                return
+            try:
+                callback = local_oauth_callback_url(category, value)
+            except ValueError as exc:
+                append_process_output(str(exc) + "\n")
+                return
             oauth_response.clear()
-            append_process_output("Pixiv authorization response sent securely.\n")
+            reply = oauth_network.get(QNetworkRequest(QUrl(callback)))
+
+            def callback_finished() -> None:
+                if reply.error() != QNetworkReply.NoError:
+                    append_process_output("Local callback could not be delivered. Check that OAuth is still waiting.\n")
+                else:
+                    append_process_output("Local callback delivered to gallery-dl.\n")
+                reply.deleteLater()
+
+            reply.finished.connect(callback_finished)
 
         def use_new_cache() -> None:
             category = selected_site() or "account"
@@ -1738,9 +1759,21 @@ class ManagementMixin:
             oauth_button.setEnabled(auth_kind == "oauth" and process.state() == QProcess.NotRunning)
             clear_secret_button.setEnabled(auth_kind in {"username_password", "api_key"})
             oauth_instance.setEnabled(auth_kind == "oauth" and selected_site() == "mastodon")
+            site_changed()
 
         def site_changed(*_args) -> None:
-            oauth_instance.setEnabled(kind.currentData() == "oauth" and selected_site() == "mastodon")
+            category = selected_site()
+            oauth_instance.setEnabled(kind.currentData() == "oauth" and category == "mastodon")
+            if kind.currentData() == "oauth":
+                send_oauth_response.setText("Send Pixiv Code" if category == "pixiv" else "Send Callback URL")
+                oauth_response.setPlaceholderText(
+                    "Pixiv code or callback URL" if category == "pixiv" else
+                    "Full HTTPS redirect or http://localhost:6414/?... URL"
+                )
+                try:
+                    oauth_note.setText(oauth_flow_guidance(category))
+                except ValueError:
+                    oauth_note.setText("Select a supported OAuth site to see its instructions.")
 
         table.itemSelectionChanged.connect(load_selected)
         new_button.clicked.connect(clear_form)
@@ -1957,7 +1990,19 @@ class ManagementMixin:
     def _build_runtime_tab(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
-        current = QLabel(f"Current command: {self.gdl_cmd or 'not found'}")
+        frozen = bool(getattr(sys, "frozen", False))
+        current = QLabel(f"gallery-dl in use: {self.gdl_cmd or 'not found'}")
+        current.setWordWrap(True)
+        if frozen:
+            note = QLabel(
+                "gallery-dl is included with this application. No separate Python runtime or installation is needed. "
+                "To update the included gallery-dl, install a newer GdlScrape release."
+            )
+            note.setWordWrap(True)
+            layout.addWidget(note)
+            layout.addWidget(current)
+            layout.addStretch(1)
+            return page
         managed = QLabel(f"Managed runtime: {self._managed_gallery_dl()}")
         managed.setWordWrap(True)
         output = QPlainTextEdit()
@@ -1993,7 +2038,7 @@ class ManagementMixin:
 
         def start_install() -> None:
             if self.active_workers > 0 or (self._runtime_process and self._runtime_process.state() != QProcess.NotRunning):
-                QMessageBox.information(page, "Runtime", "Wait for downloads or the current runtime operation to finish.")
+                self.show_compact_message("Runtime", "Wait for downloads or the current runtime operation to finish.", "info")
                 return
             answer = QMessageBox.question(
                 page, "Managed Runtime",
@@ -2047,7 +2092,7 @@ class ManagementMixin:
                 self._refresh_env()
                 self.autosave_session()
                 if isValid(current):
-                    current.setText(f"Current command: {self.gdl_cmd}")
+                    current.setText(f"gallery-dl in use: {self.gdl_cmd}")
                 runtime_message("Managed runtime is ready and selected.")
             else:
                 runtime_message("Runtime operation finished, but gallery-dl was not created.")
@@ -2061,7 +2106,7 @@ class ManagementMixin:
             self.gdl_cmd = str(executable)
             self._refresh_env()
             self.autosave_session()
-            current.setText(f"Current command: {self.gdl_cmd}")
+            current.setText(f"gallery-dl in use: {self.gdl_cmd}")
 
         install.clicked.connect(start_install)
         use_managed.clicked.connect(activate_managed)

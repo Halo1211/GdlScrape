@@ -62,6 +62,11 @@ class MainWindow(
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
         AdvancedToolsMixin.closeEvent(self, event)
 
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        super().resizeEvent(event)
+        if hasattr(self, "lbl_app_version"):
+            self._update_header_compact()
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")

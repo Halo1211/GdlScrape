@@ -22,9 +22,12 @@ from gallery_dl_app.composer import (
     build_composer_config,
     composer_oauth_target,
     config_option_definitions,
+    documented_config_options,
+    apply_config_path_drafts,
     config_defaults,
     parse_typed_config_value,
     pixiv_site_options,
+    pixiv_novel_options,
     reddit_site_options,
     redact_auth_config,
     site_archive_options,
@@ -44,6 +47,9 @@ from gallery_dl_app.reports import (
 )
 from gallery_dl_app.secure_vault import SecretVault
 from gallery_dl_app.system_tools import SystemToolsMixin, is_gallery_dl_version_output
+from gallery_dl_app.url_builder import URL_RECIPE_MODES, build_site_url
+from gallery_dl.formatter import StringFormatter
+from gallery_dl_app.oauth_flow import local_oauth_callback_url, oauth_flow_guidance
 
 
 def make_worker(**overrides):
@@ -819,7 +825,102 @@ class CommandBuilderTests(unittest.TestCase):
                 self.assertNotIn("'", argv)
 
 
+class OAuthStreamingTests(unittest.TestCase):
+    def test_oauth_guidance_and_manual_callbacks_cover_multiple_sites(self):
+        for site in ("deviantart", "reddit", "flickr", "smugmug", "tumblr", "mastodon"):
+            self.assertIn("localhost:6414", oauth_flow_guidance(site))
+        self.assertIn("30 seconds", oauth_flow_guidance("pixiv"))
+        oauth2 = local_oauth_callback_url(
+            "deviantart", "https://mikf.github.io/gallery-dl/oauth-redirect.html?state=abc&code=xyz",
+        )
+        self.assertEqual(oauth2, "http://localhost:6414/?state=abc&code=xyz")
+        oauth1 = local_oauth_callback_url(
+            "smugmug", "http://localhost:6414/?oauth_token=abc&oauth_verifier=xyz",
+        )
+        self.assertEqual(oauth1, "http://localhost:6414/?oauth_token=abc&oauth_verifier=xyz")
+        for response in (
+            "https://evil.example/?state=abc&code=xyz",
+            "http://localhost:9999/?state=abc&code=xyz",
+            "http://localhost:6414/?code=xyz",
+            "http://localhost:6414/?state=abc&code=xyz\r\nHost: evil",
+            "http://localhost:invalid/?state=abc&code=xyz",
+            "http://localhost:6414/?state=abc&code=" + "x" * 901,
+        ):
+            with self.subTest(response=response), self.assertRaises(ValueError):
+                local_oauth_callback_url("reddit", response)
+
+    def test_instructions_and_prompt_appear_before_process_finishes(self):
+        stream = gui.OAuthOutputRedactor()
+        self.assertEqual(stream.feed("1) Open your browser\n2) Copy the code\n"),
+                         "1) Open your browser\n2) Copy the code\n")
+        self.assertEqual(stream.feed("co"), "")
+        self.assertEqual(stream.feed("de: "), "code: ")
+        self.assertEqual(stream.finish(), "")
+
+    def test_token_split_across_chunks_never_appears_in_live_output(self):
+        stream = gui.OAuthOutputRedactor()
+        pieces = ["Your 'refresh-to", "ken' is\n\n", "super-secret", "-token\n\nDone\n"]
+        output = "".join(stream.feed(piece) for piece in pieces) + stream.finish()
+        self.assertIn("Your 'refresh-token' is", output)
+        self.assertIn("Done", output)
+        self.assertIn(gui.REDACTED, output)
+        self.assertNotIn("super-secret", output)
+
+
 class DownloadComposerTests(unittest.TestCase):
+    def test_guided_url_recipes_match_installed_extractors(self):
+        samples = {
+            "tag": "sleepy cat",
+            "post": "12345",
+            "pool": "12345",
+            "favorite": "12345",
+            "artwork": "12345",
+            "user": "12345",
+            "gallery": "artist",
+            "subreddit": "art",
+            "submission": "art:abc123",
+            "media": "artist",
+            "tweet": "artist:12345",
+            "creator": "artist",
+            "image": "artist:12345",
+        }
+        for site, modes in URL_RECIPE_MODES.items():
+            for mode in modes:
+                target = ("patreon:12345:67890" if site == "kemono" and mode == "post"
+                          else "patreon:12345" if site == "kemono" else samples[mode])
+                with self.subTest(site=site, mode=mode):
+                    url, subcategory = build_site_url(site, mode, target)
+                    self.assertTrue(url.startswith("https://"))
+                    self.assertTrue(subcategory)
+        hypnohub_url, category = build_site_url("hypnohub", "tag", "sleepy cat")
+        self.assertIn("tags=sleepy+cat", hypnohub_url)
+        self.assertEqual(category, "tag")
+        with self.assertRaises(ValueError):
+            build_site_url("hypnohub", "post", "TAG")
+
+    def test_guided_urls_accept_common_social_handles_and_flickr_ids(self):
+        twitter_url, _ = build_site_url("twitter", "user", "@artist")
+        self.assertEqual(twitter_url, "https://x.com/artist")
+        tweet_url, _ = build_site_url("twitter", "tweet", "@artist:12345")
+        self.assertEqual(tweet_url, "https://x.com/artist/status/12345")
+        flickr_url, _ = build_site_url("flickr", "image", "12345678@N00:12345")
+        self.assertEqual(flickr_url, "https://www.flickr.com/photos/12345678@N00/12345")
+
+    def test_booru_site_presets_have_directory_fallbacks_for_post_urls(self):
+        definitions = {
+            item["key"]: item for item in SystemToolsMixin().gallery_dl_site_preset_definitions()
+        }
+        hypnohub = definitions["hypnohub"]["directory"][2]
+        paheal = definitions["paheal"]["directory"][2]
+        for metadata, expected in (
+            ({"search_tags": "sleepy cat"}, "sleepy cat"),
+            ({"pool": 12345}, "12345"),
+            ({"favorite_id": 67890}, "67890"),
+            ({"id": 99999}, "99999"),
+        ):
+            self.assertEqual(StringFormatter(hypnohub).format_map(metadata), expected)
+        self.assertEqual(StringFormatter(paheal).format_map({"id": 12345}), "12345")
+
     def test_oauth_target_accepts_only_picker_sites_and_requires_mastodon_instance(self):
         self.assertEqual(composer_oauth_target("pixiv"), "oauth:pixiv")
         self.assertEqual(
@@ -848,6 +949,44 @@ class DownloadComposerTests(unittest.TestCase):
         self.assertGreater(len(config_option_definitions("pixiv")), 30)
         twitter = {item.key: item for item in config_option_definitions("twitter")}
         self.assertEqual((twitter["replies"].value_type, twitter["replies"].default), ("boolean", True))
+
+    def test_pinned_offline_reference_covers_all_config_sections(self):
+        entries = {item["path"]: item for item in documented_config_options()}
+        self.assertGreaterEqual(len(entries), 640)
+        for path in (
+            "extractor.pixiv.include",
+            "extractor.pixiv-novel.covers",
+            "downloader.http.chunk-size",
+            "output.progress",
+            "postprocessor.classify.mapping",
+            "extractor.*.password",
+            "extractor.bluesky.post.depth",
+        ):
+            self.assertIn(path, entries)
+        pixiv = {item.key: item for item in config_option_definitions("pixiv")}
+        self.assertIn("work.related", entries["extractor.pixiv.work.related"]["path"])
+        self.assertIn("sanity", pixiv)
+        self.assertIn("write-pages", {item.key for item in config_option_definitions()})
+
+    def test_full_reference_edits_nested_and_output_paths_without_losing_peers(self):
+        original = {
+            "extractor": {"pixiv": {"work": {"other": 1}}},
+            "downloader": {"http": {"timeout": 20}},
+            "output": {"log": "keep", "progress": True},
+        }
+        edited = apply_config_path_drafts(
+            original,
+            overrides={
+                ("extractor", "pixiv", "work", "related"): True,
+                ("downloader", "http", "chunk-size"): 65536,
+                ("output", "progress"): False,
+            },
+            removals={("downloader", "http", "timeout")},
+        )
+        self.assertEqual(edited["extractor"]["pixiv"]["work"], {"other": 1, "related": True})
+        self.assertEqual(edited["downloader"]["http"], {"chunk-size": 65536})
+        self.assertEqual(edited["output"], {"log": "keep", "progress": False})
+        self.assertIn("timeout", original["downloader"]["http"])
 
     def test_config_editor_applies_general_and_site_edits_and_real_removals(self):
         original = {
@@ -899,16 +1038,16 @@ class DownloadComposerTests(unittest.TestCase):
     def test_pixiv_gui_builds_requested_non_secret_options(self):
         options = pixiv_site_options(
             include=["background", "artworks", "avatar", "novel-user"],
-            embeds=True,
-            covers=True,
-            full_series=True,
             metadata=True,
             ugoira="original",
         )
 
         self.assertEqual(options["include"], ["background", "artworks", "avatar", "novel-user"])
-        self.assertIs(options["embeds"], True)
+        self.assertNotIn("embeds", options)
         self.assertEqual(options["ugoira"], "original")
+        novels = pixiv_novel_options(embeds=True, covers=True, full_series=True)
+        self.assertEqual([novels[key] for key in ("embeds", "covers", "full-series")], [True, True, True])
+        self.assertIs(novels["metadata"], False)
 
     def test_advanced_site_option_parser_is_typed_and_rejects_invalid_json(self):
         self.assertIs(parse_typed_config_value("false", "boolean"), False)
@@ -1839,6 +1978,15 @@ class SpreadsheetImportTests(unittest.TestCase):
                 ("", "untagged note"),
             ],
         )
+
+    def test_csv_import_preserves_spaces_inside_destination(self):
+        content = 'url,destination\nhttps://example.com/a,"F:/My  Art/Artist  Name"\n'
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "paths.csv"
+            path.write_text(content, encoding="utf-8")
+            command = QueueControllerMixin().read_csv_as_commands(str(path))
+        jobs = gui.parse_text_database(command)
+        self.assertEqual(jobs[0].dest, "F:/My  Art/Artist  Name")
 
     def test_xlsx_tag_and_notes_survive_import(self):
         import openpyxl

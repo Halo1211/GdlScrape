@@ -11,7 +11,7 @@
 <p align="center"><strong>Gallery downloads, composed.</strong></p>
 
 <p align="center">
-  <img alt="Version v1.01" src="https://img.shields.io/badge/version-v1.01-35e5c7">
+  <img alt="Version v1.0.2" src="https://img.shields.io/badge/version-v1.0.2-35e5c7">
   <a href="https://github.com/Halo1211/GdlScrape/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/Halo1211/GdlScrape/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Python 3.10+" src="https://img.shields.io/badge/Python-3.10%2B-48bfe3">
   <img alt="PySide6" src="https://img.shields.io/badge/UI-PySide6-f038d1">
@@ -28,14 +28,14 @@ GdlScrape is a desktop download manager for [`gallery-dl`](https://github.com/mi
 ## Highlights
 
 - Compose jobs from URLs or complete `gallery-dl` commands without duplicating settings.
-- Run a bounded parallel queue with pause, stop, cancel, retry, and live worker status.
+- Run a bounded parallel queue with pause, stop, cancel, retry, live worker status, and per-worker log filters.
 - Preview the final command and run a safe simulation before downloading.
 - Import TXT, CSV, or XLSX databases with tags, notes, destinations, and per-job arguments.
 - Keep a searchable SQLite library, persistent history, interrupted-run recovery, and schedules.
 - Use browser cookies, `cookies.txt`, OAuth, or secure OS-backed account profiles.
 - Build site presets, filters, archive settings, and post-processing rules visually.
 - Switch between dark and light themes and English or Indonesian UI text.
-- Install or update an isolated `gallery-dl` runtime from the management center.
+- Use the gallery-dl executable included in the Windows release folder; source installs can manage an isolated runtime from the management center.
 - Protect exported logs, reports, sessions, and previews with credential redaction.
 
 ## Requirements
@@ -52,7 +52,9 @@ Optional tools extend specific workflows:
 
 ## Quick start
 
-Windows users can download the standalone `GdlScrape-v1.01.exe` from the [v1.01 GitHub Release](https://github.com/Halo1211/GdlScrape/releases/tag/v1.01). Verify it with the accompanying `SHA256SUMS.txt`; no separate Python installation is required.
+Windows users can download the `GdlScrape-v1.0.2-win64.zip` package from the [v1.0.2 GitHub Release](https://github.com/Halo1211/GdlScrape/releases/tag/v1.0.2). Extract the whole archive and run `GdlScrape.exe`. Verify it with the accompanying `SHA256SUMS.txt`; no separate Python installation is required.
+
+For a build from this source tree, run `scripts/build_windows.ps1` and open `release/GdlScrape/GdlScrape.exe`. Keep the entire `GdlScrape` folder together.
 
 ```powershell
 git clone https://github.com/Halo1211/GdlScrape.git
@@ -72,6 +74,7 @@ py -m gallery_dl_app
 1. Open **Composer** and add one or more supported URLs.
 2. Configure authentication under **Login & Cookies** only when the site requires it.
 3. Apply one-time job overrides or save reusable defaults to the active config.
+   Use the separate **Config** button when you only want to edit saved defaults.
 4. Select **Prepare safe test** and review the command preview.
 5. Add the jobs to the queue and press `Ctrl+Enter` to start.
 
@@ -87,16 +90,19 @@ Open **Library & Automation Center → Accounts**, then:
 
 **Secret** is the generic security term for a password, API key, or token. Passwords and tokens are stored in the operating-system credential vault; the account database stores only an opaque reference. Browser-cookie paths and usernames are profile metadata, not secrets.
 
-For OAuth, select Pixiv, DeviantArt, Flickr, Reddit, SmugMug, Tumblr, or Mastodon and press **Connect OAuth**. Mastodon also needs its instance hostname. Pixiv may ask for a short-lived callback code; paste it into the protected authorization-response field. Each account profile has an isolated cache so separate accounts do not overwrite each other's sessions. **Cache Tools** can inspect, clear expired entries, clear the whole profile cache, or optimize it; **Clear Site Cache** logs out only the selected extractor in that profile.
+For OAuth, select Pixiv, DeviantArt, Flickr, Reddit, SmugMug, Tumblr, or Mastodon and press **Connect OAuth**. Site-specific instructions and gallery-dl output appear live in the account panel. Mastodon also needs its instance hostname. Pixiv asks for a short-lived code from the browser's Developer Tools; paste it into **Authorization response** and press **Send Pixiv Code** within 30 seconds. The other sites normally return through a browser redirect to gallery-dl's local listener on `localhost:6414`. If that redirect fails, paste the complete URL from the official gallery-dl redirect page or the local callback into **Authorization response** and press **Send Callback URL**. Flickr requires your own `extractor.flickr.api-key` and `api-secret` before OAuth; the default blank keys cannot authorize. The GUI sends the Pixiv code or local callback without a separate console. Issued refresh tokens are masked in the output. Each account profile has an isolated cache so separate accounts do not overwrite each other's sessions. **Cache Tools** can inspect, clear expired entries, clear the whole profile cache, or optimize it; **Clear Site Cache** logs out only the selected extractor in that profile.
+
+The Composer's **URL guide** builds URLs for supported booru tag, post, pool, and favorite pages, including Hypnohub, Rule34, Safebooru, TBIB, XBooru, and Gelbooru. It also covers Paheal, Danbooru, E621-family sites, Pixiv, DeviantArt, Reddit, Twitter/X, Kemono, Fanbox, and Flickr. Each generated URL is checked against the installed gallery-dl extractor before it is added. For Hypnohub and Paheal presets, output-directory templates now fall back to post or pool identifiers when a tag name is unavailable.
 
 ## Site-specific config
 
 Open **Composer → Sites → Site Config Studio** to edit extractor-specific settings without writing JSON manually:
 
-- **All Options** can edit either **General defaults** (`extractor.<option>`, used by every site) or a **Per-site override** (`extractor.<site>.<option>`). Choose a site from the installed extractor list, search its option catalog, review the current value and its source, then use **Set value** or **Remove / inherit**. The catalog combines common documented settings with options discovered from the installed gallery-dl extractors, while keeping the value type explicit.
+- **All Options** can edit either **General defaults** (`extractor.<option>`, used by every site) or a **Per-site override** (`extractor.<site>.<option>`). Choose a site from the installed extractor list, search its option catalog, review the current value and its source, then use **Set value** or **Remove / inherit**. The catalog combines common settings, the pinned official gallery-dl 1.32.12 manual, and options discovered from the installed extractors.
+- **Full Reference** searches an offline index of 645 documented configuration paths, including extractor, downloader, output, and postprocessor sections. Select a concrete path to set or remove a typed value directly. Postprocessor item fields are reference-only because they must be placed inside an `extractor.postprocessors` entry. The tab links to the current official manual.
 - **Archive** creates a separate SQLite archive path for any site, controls `duplicates`, and sets `archive-format`. A copied `\_` is normalized to `_` because JSON does not accept `\_` as an escape sequence.
 - **Reddit** writes the current `client-id` and `user-agent-oauth` keys. After changing the client ID, clear the Reddit site cache from the matching Account profile before reconnecting OAuth.
-- **Pixiv** controls `include`, `embeds`, `covers`, `full-series`, `metadata`, and `ugoira`. Account OAuth is recommended; protected `refresh-token` and `cookies.PHPSESSID` fields are available only for legacy manual configs and require a plain-text storage confirmation.
+- **Pixiv** separates artwork/profile settings (`extractor.pixiv`) from novel settings (`extractor.pixiv-novel`), with aligned groups for include, metadata, comments, captions, tags, covers, embeds, full-series, and ugoira. Account OAuth is recommended; protected `refresh-token` and `cookies.PHPSESSID` fields are available only for legacy manual configs and require a plain-text storage confirmation.
 - **Advanced** adds any documented extractor option with an explicit text, boolean, integer, number, JSON, or null type. Sensitive option previews are always hidden.
 
 General values flow down to every site; a per-site value wins only for that extractor. **Remove / inherit** deletes the selected saved value instead of writing a fake empty value, allowing the next broader level or gallery-dl's built-in default to take effect. Studio changes are merged with the active config, preserving unknown options. They remain unsaved until **Save Defaults** is used, and an existing config is backed up before replacement.
@@ -158,7 +164,7 @@ Build a Windows executable with:
 .\scripts\build_windows.ps1
 ```
 
-The script produces a standalone Windows executable at `release/GdlScrape.exe`. It can be distributed as a single file and does not require a separate Python installation. The release directory is intentionally ignored by Git. See [ARCHITECTURE.md](ARCHITECTURE.md) for component boundaries and [CONTRIBUTING.md](CONTRIBUTING.md) before submitting changes.
+The script produces `release/GdlScrape/GdlScrape.exe`, a bundled `gallery-dl.exe`, and a versioned ZIP containing the entire application folder. Distribute the ZIP or the whole `release/GdlScrape` folder, including `_internal`; the application does not require a separate Python or gallery-dl installation. The ZIP checksum is in `release/SHA256SUMS.txt`, and executable checksums are inside the application folder. This one-folder build avoids the temporary extraction performed by one-file bundles and disables UPX compression. Antivirus classification cannot be guaranteed by packaging alone; release signing and a false-positive report to the vendor may still be needed. The release directory is ignored by Git. See [ARCHITECTURE.md](ARCHITECTURE.md) for component boundaries and [CONTRIBUTING.md](CONTRIBUTING.md) before submitting changes.
 
 ## Data location
 
@@ -166,7 +172,7 @@ Application data is stored outside the repository under `~/.gallery_dl_gui_dashb
 
 ## Release status
 
-This repository represents **GdlScrape v1.01**. See [CHANGELOG.md](CHANGELOG.md) for release notes.
+This repository represents **GdlScrape v1.0.2**. See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ## License
 

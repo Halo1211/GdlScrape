@@ -127,6 +127,8 @@ class QueueControllerMixin:
             self.btn_choose_config.setEnabled(not running)
         if hasattr(self, "btn_action_builder"):
             self.btn_action_builder.setEnabled(not running)
+        if hasattr(self, "btn_action_config"):
+            self.btn_action_config.setEnabled(not running)
         if hasattr(self, "btn_config_guide_side"):
             self.btn_config_guide_side.setEnabled(not running)
         self.btn_retry.setEnabled((not running) and bool(self.failed_indices or self.stopped_indices or self.cancelled_indices))
@@ -147,7 +149,10 @@ class QueueControllerMixin:
         self.progress.setMaximum(max(1, self.total_run))
         self.progress.setValue(self.processed_run)
         self.btn_retry.setEnabled(bool(self.failed_indices or self.stopped_indices or self.cancelled_indices) and self.active_workers <= 0)
-        duplicate_count = sum(len(group) - 1 for group in find_exact_duplicate_groups(self.jobs))
+        if getattr(self, "_duplicate_count_dirty", True):
+            self._duplicate_count = sum(len(group) - 1 for group in find_exact_duplicate_groups(self.jobs))
+            self._duplicate_count_dirty = False
+        duplicate_count = self._duplicate_count
         state = "Running" if self.active_workers > 0 else "Ready"
         if self._ui_is_indonesian():
             state = "Berjalan" if self.active_workers > 0 else "Siap"
@@ -187,6 +192,8 @@ class QueueControllerMixin:
             return any(x in low for x in ("done", "✅"))
         if mode_key == "Current worker lines":
             return line.startswith("[W")
+        if mode_key.startswith("Worker "):
+            return line.startswith(f"[W{mode_key[7:]}]")
         return True
 
     def append_log(self, text: str) -> None:
@@ -269,6 +276,7 @@ class QueueControllerMixin:
             self.show_compact_message("Queue input rejected", str(exc), "error")
             return False
         self.jobs = parsed_jobs
+        self._duplicate_count_dirty = True
         self._clear_result_state()
         self.populate_queue_table()
         self._update_counts()
@@ -642,6 +650,7 @@ class QueueControllerMixin:
         self.started_at = None
 
     def sync_editor_from_jobs(self) -> None:
+        self._duplicate_count_dirty = True
         self.txt_commands.blockSignals(True)
         lines: list[str] = []
         last_tag = ""
@@ -1308,6 +1317,7 @@ class QueueControllerMixin:
     def on_job_started(self, worker_id: int, idx: int, url: str) -> None:
         self.active_job_indices.add(idx)
         self.set_queue_status(idx, "running")
+        self._update_counts()
         try:
             self.feature_store.mark_run_item(self.current_run_id, idx, "running")
         except Exception as exc:
@@ -1366,6 +1376,7 @@ class QueueControllerMixin:
         if 0 <= worker_id < self.tbl_workers.rowCount():
             self.tbl_workers.setItem(worker_id, 1, self.status_item("idle"))
             self.tbl_workers.setItem(worker_id, 2, QTableWidgetItem(""))
+        self._update_counts()
         if getattr(self, "_rolling_back_worker_start", False):
             return
         if self.active_workers <= 0:

@@ -66,6 +66,66 @@ def application_icon(dark: bool = True) -> QIcon:
     return icon
 
 
+def action_icon(name: str, *, dark: bool = True) -> QIcon:
+    """Draw small interface symbols explicitly so platform icon themes cannot hide them."""
+    pixmap = QPixmap(20, 20)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    color = QColor("#e5eefb" if dark else "#26364d")
+    painter.setPen(QPen(color, 1.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    painter.setBrush(Qt.NoBrush)
+    if name in {"open", "folder"}:
+        painter.drawLine(2, 6, 8, 6)
+        painter.drawLine(8, 6, 10, 8)
+        painter.drawLine(10, 8, 17, 8)
+        painter.drawRoundedRect(2, 8, 16, 10, 1.5, 1.5)
+    elif name == "paste":
+        painter.drawRoundedRect(5, 4, 11, 13, 1, 1)
+        painter.drawLine(8, 2, 13, 2)
+        painter.drawLine(8, 8, 13, 8)
+        painter.drawLine(8, 11, 13, 11)
+    elif name == "trash":
+        painter.drawLine(4, 5, 16, 5)
+        painter.drawLine(8, 3, 12, 3)
+        painter.drawRoundedRect(6, 7, 8, 10, 1, 1)
+        painter.drawLine(9, 9, 9, 15)
+        painter.drawLine(11, 9, 11, 15)
+    elif name == "download":
+        painter.drawLine(10, 2, 10, 13)
+        painter.drawLine(6, 9, 10, 13)
+        painter.drawLine(10, 13, 14, 9)
+        painter.drawLine(4, 17, 16, 17)
+    elif name == "pause":
+        painter.drawRoundedRect(5, 4, 3, 12, 0.5, 0.5)
+        painter.drawRoundedRect(12, 4, 3, 12, 0.5, 0.5)
+    elif name == "cancel":
+        painter.drawLine(5, 5, 15, 15)
+        painter.drawLine(15, 5, 5, 15)
+    elif name == "retry":
+        painter.drawArc(4, 4, 12, 12, 30 * 16, 295 * 16)
+        painter.drawLine(14, 4, 17, 4)
+        painter.drawLine(17, 4, 17, 7)
+    elif name == "stop":
+        painter.drawRoundedRect(5, 5, 10, 10, 1, 1)
+    elif name == "info":
+        painter.drawEllipse(3, 3, 14, 14)
+        painter.drawLine(10, 9, 10, 14)
+        painter.drawPoint(10, 6)
+    elif name == "warning":
+        painter.drawLine(10, 3, 18, 17)
+        painter.drawLine(18, 17, 2, 17)
+        painter.drawLine(2, 17, 10, 3)
+        painter.drawLine(10, 8, 10, 12)
+        painter.drawPoint(10, 15)
+    elif name == "error":
+        painter.drawEllipse(3, 3, 14, 14)
+        painter.drawLine(7, 7, 13, 13)
+        painter.drawLine(13, 7, 7, 13)
+    painter.end()
+    return QIcon(pixmap)
+
+
 def apply_native_window_theme(widget: QWidget, dark: bool) -> bool:
     """Keep the Windows caption/title bar aligned with the Qt theme."""
     if platform.system() != "Windows":
@@ -179,6 +239,7 @@ QPlainTextEdit, QTextEdit {
     color: #f4f7ff;
 }
 QLineEdit, QSpinBox, QComboBox { padding: 3px 8px; min-height: 22px; }
+QComboBox#headerCombo { min-width: 0; padding: 3px 4px; }
 QLabel#fieldLabel { color: #aeb8c8; font-size: 12px; font-weight: 600; min-height: 17px; padding: 0; margin: 0; }
 QComboBox::drop-down { border: none; width: 22px; }
 QComboBox QAbstractItemView { background: #080d13; color: #eef3ff; border: 1px solid #303a48; selection-background-color: #273247; selection-color: #ffffff; }
@@ -237,7 +298,7 @@ QPushButton#warn {
     font-weight: 800;
 }
 QPushButton#mini { padding: 3px 6px; min-width: 64px; }
-QMessageBox QLabel { min-width: 260px; max-width: 480px; }
+QMessageBox QLabel#qt_msgbox_label { max-width: 480px; qproperty-wordWrap: true; }
 QMessageBox QPushButton { min-width: 68px; max-width: 96px; }
 QCheckBox { color: #f2f6ff; spacing: 8px; }
 QCheckBox::indicator { width: 15px; height: 15px; }
@@ -273,7 +334,7 @@ QTabBar::tab {
 QTabBar::tab:selected { background: #273247; color: #ffffff; }
 QSplitter::handle { background: #303a48; }
 QMessageBox { background: #11161d; }
-QMessageBox QLabel { color: #eef3ff; min-width: 280px; max-width: 500px; min-height: 24px; padding: 6px; qproperty-wordWrap: true; }
+QMessageBox QLabel#qt_msgbox_label { color: #eef3ff; max-width: 500px; min-height: 24px; padding: 6px; qproperty-wordWrap: true; }
 QMessageBox QPushButton { min-width: 68px; min-height: 26px; padding: 4px 10px; }
 QDialog QLabel { min-height: 14px; }
 QDialog QPushButton { min-height: 26px; }
@@ -301,6 +362,7 @@ QGroupBox::title { subcontrol-origin: margin; left: 16px; padding: 0 8px; color:
 QLineEdit, QSpinBox, QComboBox, QPlainTextEdit, QTextEdit, QTableWidget { background: #ffffff; border: 1px solid #d9e1ec; border-radius: 8px; selection-background-color: #2368c4; selection-color: #ffffff; }
 QPlainTextEdit, QTextEdit { font-family: 'Cascadia Mono', 'Consolas', monospace; font-size: 12px; }
 QLineEdit, QSpinBox, QComboBox { padding: 3px 8px; min-height: 22px; }
+QComboBox#headerCombo { min-width: 0; padding: 3px 4px; }
 QComboBox QAbstractItemView { background: #ffffff; color: #172033; border: 1px solid #ccd7e6; selection-background-color: #e5f0ff; selection-color: #1559a6; }
 QLabel#fieldLabel { color: #46566e; font-size: 12px; font-weight: 600; min-height: 17px; padding: 0; margin: 0; }
 QSpinBox { min-width: 88px; }
@@ -330,14 +392,14 @@ QPushButton#primary { background: #4a9cff; color: #ffffff; border: none; font-si
 QPushButton#danger { background: #ff554f; color: #ffffff; border: none; font-weight: 900; padding: 5px 10px; }
 QPushButton#warn { background: #ffd166; color: #4d3600; border: none; font-weight: 800; }
 QProgressBar { background: #e8edf5; border: 1px solid #d9e1ec; border-radius: 6px; height: 14px; text-align: center; }
-QMessageBox QLabel { min-width: 260px; max-width: 480px; }
+QMessageBox QLabel#qt_msgbox_label { max-width: 480px; qproperty-wordWrap: true; }
 QMessageBox QPushButton { min-width: 68px; max-width: 96px; }
 QProgressBar::chunk { background: #4a9cff; border-radius: 5px; }
 QHeaderView::section { background: #edf3fb; color: #2368c4; border: none; border-bottom: 1px solid #d9e1ec; padding: 8px; font-weight: 800; }
 QTabBar::tab { background: #edf3fb; padding: 6px 10px; border-top-left-radius: 8px; border-top-right-radius: 8px; margin-right: 2px; }
 QTabBar::tab:selected { background: #ffffff; color: #172033; }
 QMessageBox { background: #f5f7fb; }
-QMessageBox QLabel { color: #172033; min-width: 280px; max-width: 500px; min-height: 24px; padding: 6px; qproperty-wordWrap: true; }
+QMessageBox QLabel#qt_msgbox_label { color: #172033; max-width: 500px; min-height: 24px; padding: 6px; qproperty-wordWrap: true; }
 QMessageBox QPushButton { min-width: 68px; min-height: 26px; padding: 4px 10px; }
 QDialog QLabel { min-height: 14px; }
 QDialog QPushButton { min-height: 26px; }
@@ -626,6 +688,29 @@ QSplitter#dashboardSplitter::handle { background: #d4dfeb; width: 1px; }
 QStatusBar { background: #ffffff; color: #62748c; border-top: 1px solid #d7e2ed; font-size: 10px; }
 QToolTip { background: #ffffff; color: #26364d; border: 1px solid #bfcddd; padding: 5px; }
 """
+
+
+def _control_glyph_qss(theme: str) -> str:
+    """Pin control arrows to bundled PNGs; native glyphs vanish under QSS on Windows."""
+    assets = Path(__file__).resolve().parent / "assets"
+    up = (assets / f"control-up-{theme}.png").as_posix()
+    down = (assets / f"control-down-{theme}.png").as_posix()
+    check = (assets / "control-check.png").as_posix()
+    return f"""
+QSpinBox::up-arrow {{ image: url("{up}"); width: 11px; height: 11px; }}
+QSpinBox::down-arrow {{ image: url("{down}"); width: 11px; height: 11px; }}
+QComboBox::down-arrow {{ image: url("{down}"); width: 11px; height: 11px; }}
+QCheckBox::indicator:checked {{
+    border: 1px solid #4a9cff;
+    border-radius: 4px;
+    background: #4a9cff;
+    image: url("{check}");
+}}
+"""
+
+
+DARK_QSS += _control_glyph_qss("dark")
+LIGHT_QSS += _control_glyph_qss("light")
 
 __all__ = [
     'DARK_QSS',

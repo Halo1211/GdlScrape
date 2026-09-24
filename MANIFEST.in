@@ -3,3 +3,4 @@ include CHANGELOG.md
 include SECURITY.md
 include ARCHITECTURE.md
 recursive-include gallery_dl_app/assets *.png
+recursive-include gallery_dl_app/assets *.json

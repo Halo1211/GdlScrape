@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
 
 
 from .core import APP_VERSION
-from .themes import application_icon
+from .themes import action_icon, application_icon
 
 
 class ActivityGraph(QWidget):
@@ -106,9 +106,27 @@ class DashboardUiMixin:
         return label
 
     def _set_standard_icon(self, button: QPushButton, icon: QStyle.StandardPixmap) -> None:
-        """Use native Qt icons so button rendering never depends on emoji fonts."""
-        button.setIcon(self.style().standardIcon(icon))
+        """Use bundled vector drawings instead of platform dependent native icons."""
+        names = {
+            QStyle.SP_DialogOpenButton: "open",
+            QStyle.SP_DialogApplyButton: "paste",
+            QStyle.SP_TrashIcon: "trash",
+            QStyle.SP_DirOpenIcon: "folder",
+            QStyle.SP_ArrowDown: "download",
+            QStyle.SP_MediaPause: "pause",
+            QStyle.SP_DialogCancelButton: "cancel",
+            QStyle.SP_BrowserReload: "retry",
+            QStyle.SP_MediaStop: "stop",
+        }
+        button.setProperty("actionIcon", names[icon])
+        button.setIcon(action_icon(names[icon], dark=self.current_theme == "dark"))
         button.setIconSize(QSize(16, 16))
+
+    def _refresh_action_icons(self) -> None:
+        for button in self.findChildren(QPushButton):
+            name = button.property("actionIcon")
+            if name:
+                button.setIcon(action_icon(str(name), dark=self.current_theme == "dark"))
 
     def _metric(self, title: str, value: str, accent: str = "cyan") -> tuple[QFrame, QLabel]:
         frame = QFrame()
@@ -167,6 +185,7 @@ class DashboardUiMixin:
         self.lbl_language = QLabel("LANG")
         self.lbl_language.setObjectName("eyebrow")
         self.combo_help_language = QComboBox()
+        self.combo_help_language.setObjectName("headerCombo")
         self.combo_help_language.addItems(["English", "Indonesia"])
         self.combo_help_language.setCurrentText(getattr(self, "help_language", "English"))
         self.combo_help_language.setFixedWidth(108)
@@ -174,6 +193,7 @@ class DashboardUiMixin:
         self.lbl_theme = QLabel("THEME")
         self.lbl_theme.setObjectName("eyebrow")
         self.combo_theme = QComboBox()
+        self.combo_theme.setObjectName("headerCombo")
         self.combo_theme.addItem("Dark", "dark")
         self.combo_theme.addItem("Light", "light")
         theme_index = self.combo_theme.findData(getattr(self, "current_theme", "dark"))
@@ -283,6 +303,10 @@ class DashboardUiMixin:
         out_row.addWidget(self.edit_output, 1)
         out_row.addWidget(self.btn_output)
         dest_l.addLayout(out_row)
+        self.lbl_destination_hint = QLabel("A command's custom destination overrides this default folder.")
+        self.lbl_destination_hint.setObjectName("subtle")
+        self.lbl_destination_hint.setWordWrap(True)
+        dest_l.addWidget(self.lbl_destination_hint)
         self.btn_open_output = QPushButton("Open output folder")
         self.btn_open_output.setObjectName("ghost")
         self.btn_open_output.clicked.connect(self.open_output_folder)
@@ -300,6 +324,7 @@ class DashboardUiMixin:
         self.spin_workers = QSpinBox()
         self.spin_workers.setRange(1, 32)
         self.spin_workers.setValue(3)
+        self.spin_workers.valueChanged.connect(self._sync_worker_log_filters)
         self.spin_workers.setButtonSymbols(QAbstractSpinBox.UpDownArrows)
         self.combo_cookies = QComboBox()
         self.combo_cookies.addItems(["none", "chrome", "firefox", "edge", "brave", "chromium", "opera"])
@@ -431,17 +456,20 @@ class DashboardUiMixin:
         action_bar.setSpacing(6)
         self.btn_action_builder = self._btn("Composer", "Create downloads and reusable gallery-dl defaults in one place")
         self.btn_action_composer = self.btn_action_builder
+        self.btn_action_config = self._btn("Config", "Build and save gallery-dl configuration")
         self.btn_action_preview = self._btn("Preview", "Preview final commands")
         self.btn_action_dedupe = self._btn("Dedupe", "Remove exact duplicate jobs")
         self.btn_action_manage = self._btn("Manage", "Open library, scheduler, accounts, options, and runtime tools")
         self.btn_action_help = self._btn("Help", "Open the help center")
         self.btn_action_builder.clicked.connect(self.open_download_composer)
+        self.btn_action_config.clicked.connect(self.open_config_builder)
         self.btn_action_preview.clicked.connect(self.command_preview)
         self.btn_action_dedupe.clicked.connect(self.remove_exact_duplicates)
         self.btn_action_manage.clicked.connect(self.open_management_center)
         self.btn_action_help.clicked.connect(self.open_help_center)
         for button in (
             self.btn_action_builder,
+            self.btn_action_config,
             self.btn_action_preview,
             self.btn_action_dedupe,
             self.btn_action_manage,
@@ -481,10 +509,15 @@ class DashboardUiMixin:
         self.tbl_queue.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.tbl_queue.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tbl_queue.customContextMenuRequested.connect(self.show_queue_context_menu)
-        self.tbl_queue.horizontalHeader().setSectionResizeMode(self.COL_DEST, QHeaderView.Stretch)
+        # Keep long destinations readable at the minimum window width. A
+        # horizontal scrollbar is clearer than squeezing this column to a few
+        # pixels when the queue panel gets narrow.
+        self.tbl_queue.horizontalHeader().setSectionResizeMode(self.COL_DEST, QHeaderView.Interactive)
+        self.tbl_queue.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
         self.tbl_queue.setColumnWidth(self.COL_NUM, 38)
         self.tbl_queue.setColumnWidth(self.COL_SERVICE, 100)
         self.tbl_queue.setColumnWidth(self.COL_ID, 125)
+        self.tbl_queue.setColumnWidth(self.COL_DEST, 250)
         self.tbl_queue.setColumnWidth(self.COL_TAG, 95)
         self.tbl_queue.setColumnWidth(self.COL_STATUS, 92)
         self.tbl_queue.setColumnWidth(self.COL_STATS, 105)
@@ -497,6 +530,7 @@ class DashboardUiMixin:
         log_top = QHBoxLayout()
         self.combo_log_filter = QComboBox()
         self.combo_log_filter.addItems(["All", "Error", "Warning", "Done", "Current worker lines"])
+        self._sync_worker_log_filters()
         self.combo_log_filter.currentTextChanged.connect(self.refresh_log_view)
         self.lbl_log_counts = QLabel("Done 0   Failed 0")
         self.lbl_log_counts.setObjectName("metric")
@@ -552,6 +586,12 @@ class DashboardUiMixin:
         body.setStretchFactor(1, 1)
 
         self.apply_language_to_ui()
+        self._update_header_compact()
+
+    def _update_header_compact(self) -> None:
+        compact = self.width() < 1100
+        self.lbl_brand_tagline.setVisible(not compact)
+        self.lbl_app_version.setVisible(not compact)
 
     def _apply_main_descriptions(self, ind: bool) -> None:
         descriptions = {
@@ -577,6 +617,7 @@ class DashboardUiMixin:
             self.btn_cancel: "Batalkan baris antrean yang sedang dipilih." if ind else "Cancel the currently selected queue row.",
             self.btn_stop: "Hentikan seluruh proses unduhan." if ind else "Stop every running download.",
             self.btn_action_builder: "Susun job, default config, dan preset situs di satu tempat." if ind else "Compose jobs, config defaults, and site presets in one place.",
+            self.btn_action_config: "Buat dan simpan config gallery-dl." if ind else "Build and save gallery-dl configuration.",
             self.btn_action_preview: "Periksa perintah final sebelum dijalankan." if ind else "Inspect final commands before running them.",
             self.btn_action_dedupe: "Hapus entri yang benar-benar sama dari antrean." if ind else "Remove exact duplicate entries from the queue.",
             self.btn_action_manage: "Kelola library, jadwal, akun, opsi, dan runtime." if ind else "Manage the library, schedules, accounts, options, and runtime.",
@@ -614,6 +655,7 @@ class DashboardUiMixin:
             self.tabs.setTabText(index, text)
         if hasattr(self, "btn_action_builder"):
             self.btn_action_builder.setText("RANCANG" if ind else "COMPOSER")
+            self.btn_action_config.setText("CONFIG")
             self.btn_action_preview.setText("PRATINJAU" if ind else "PREVIEW")
             self.btn_action_dedupe.setText("DUPLIKAT" if ind else "DEDUPE")
             self.btn_action_manage.setText("KELOLA" if ind else "MANAGE")
@@ -621,9 +663,14 @@ class DashboardUiMixin:
             self.chk_compress.setText("Kompres" if ind else "Compress")
             self.chk_convert_webp.setText("PNG → WebP")
             self.lbl_theme.setText("TEMA" if ind else "THEME")
+            self.lbl_destination_hint.setText(
+                "Tujuan khusus pada command/database menggantikan folder default ini."
+                if ind else "A command or database row's custom destination overrides this default folder."
+            )
             self.combo_theme.setItemText(0, "Gelap" if ind else "Dark")
             self.combo_theme.setItemText(1, "Terang" if ind else "Light")
             self._apply_main_descriptions(ind)
+            self._sync_worker_log_filters()
 
     def _update_counts(self) -> None:
         super()._update_counts()
@@ -645,6 +692,22 @@ class DashboardUiMixin:
         if self.active_workers > 0:
             level = max(level, active / worker_capacity * 0.65)
         self.activity_graph.push(level)
+
+    def _sync_worker_log_filters(self, *_args) -> None:
+        if not hasattr(self, "combo_log_filter"):
+            return
+        combo = self.combo_log_filter
+        selected = combo.currentText()
+        base_count = 5
+        combo.blockSignals(True)
+        while combo.count() > base_count:
+            combo.removeItem(combo.count() - 1)
+        for worker_number in range(1, self.spin_workers.value() + 1):
+            combo.addItem(f"Worker {worker_number}")
+        index = combo.findText(selected)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        combo.blockSignals(False)
+        self.refresh_log_view()
 
     def _refresh_eta(self) -> None:
         super()._refresh_eta()

@@ -1,0 +1,3963 @@
+{
+  "version": "v1.32.12",
+  "source": "https://raw.githubusercontent.com/mikf/gallery-dl/v1.32.12/docs/configuration.rst",
+  "options": [
+    {
+      "path": "extractor.*.filename",
+      "type": "json",
+      "default": null,
+      "description": "A `Format String`_ to generate filenames for downloaded files. If this is an object, it must contain Conditions_ mapping to the `Format String`_ to use. These Conditions_ are evalu"
+    },
+    {
+      "path": "extractor.*.directory",
+      "type": "json",
+      "default": null,
+      "description": "A list of `Format String(s)`_ to generate the target directory path. If this is an object, it must contain Conditions_ mapping to the list of `Format Strings`_ to use. Each individ"
+    },
+    {
+      "path": "extractor.*.base-directory",
+      "type": "json",
+      "default": "./gallery-dl/",
+      "description": "Directory path used as base for all download destinations. If this is an object, it must contain Conditions_ mapping to the |Path|_ to use. Specifying a default |Path|_ with \"\" is "
+    },
+    {
+      "path": "extractor.*.follow",
+      "type": "text",
+      "default": null,
+      "description": "Follow URLs in the given `Format String`_'s result and process them with child extractors."
+    },
+    {
+      "path": "extractor.*.parent",
+      "type": "boolean",
+      "default": true,
+      "description": "Mark an extractor as a `parent` and enable parent-directory parent-metadata parent-session parent-skip for it by default."
+    },
+    {
+      "path": "extractor.*.parent-directory",
+      "type": "boolean",
+      "default": null,
+      "description": "Use an extractor's current target directory as base-directory_ for any spawned child extractors. .. _extractor..metadata-parent:"
+    },
+    {
+      "path": "extractor.*.parent-metadata",
+      "type": "text",
+      "default": true,
+      "description": "Forward a parent's metadata to its child extractors. | If this is a string, add a parent's metadata to its children's to a field named after said string. | For example with \"parent"
+    },
+    {
+      "path": "extractor.*.parent-session",
+      "type": "boolean",
+      "default": null,
+      "description": "Share a parent's session with its child extractors, including cookies, headers, and other networking settings."
+    },
+    {
+      "path": "extractor.*.parent-skip",
+      "type": "boolean",
+      "default": null,
+      "description": "Share number of skipped downloads between parent and child extractors."
+    },
+    {
+      "path": "extractor.*.path-restrict",
+      "type": "json",
+      "default": "auto",
+      "description": "| A string of characters to be replaced with the value of path-replace | or an object mapping invalid/unwanted characters, character sets, or character ranges to their replacements"
+    },
+    {
+      "path": "extractor.*.path-replace",
+      "type": "text",
+      "default": "_",
+      "description": "The replacement character(s) for path-restrict"
+    },
+    {
+      "path": "extractor.*.path-remove",
+      "type": "text",
+      "default": null,
+      "description": "Set of characters to remove from generated path names."
+    },
+    {
+      "path": "extractor.*.path-strip",
+      "type": "text",
+      "default": "auto",
+      "description": "Set of characters to remove from the end of generated path segment names using str.rstrip()"
+    },
+    {
+      "path": "extractor.*.path-convert",
+      "type": "text",
+      "default": null,
+      "description": "`Conversion(s)`_ to apply to each path segment after path-restrict replacements."
+    },
+    {
+      "path": "extractor.*.path-extended",
+      "type": "boolean",
+      "default": true,
+      "description": "On Windows, use extended-length paths prefixed with \\\\?\\ to work around the 260 characters path length limit."
+    },
+    {
+      "path": "extractor.*.extension-map",
+      "type": "json",
+      "default": null,
+      "description": "A JSON object mapping filename extensions to their replacements."
+    },
+    {
+      "path": "extractor.*.skip",
+      "type": "text",
+      "default": true,
+      "description": "Controls the behavior when downloading files that have been downloaded before, i.e. a file with the same filename already exists or its ID is in a download archive. true Skip downl"
+    },
+    {
+      "path": "extractor.*.skip-filter",
+      "type": "text",
+      "default": null,
+      "description": "Python Expression_ controlling which skipped files to count towards \"abort\" / \"terminate\" / \"exit\"."
+    },
+    {
+      "path": "extractor.*.sleep",
+      "type": "text",
+      "default": 0,
+      "description": "Number of seconds to sleep before each download."
+    },
+    {
+      "path": "extractor.*.sleep-skip",
+      "type": "text",
+      "default": 0,
+      "description": "Number of seconds to sleep after skipping a file download."
+    },
+    {
+      "path": "extractor.*.sleep-extractor",
+      "type": "text",
+      "default": 0,
+      "description": "Number of seconds to sleep before handling an input URL, i.e. before starting a new extractor."
+    },
+    {
+      "path": "extractor.*.sleep-retries",
+      "type": "text",
+      "default": "lin=1",
+      "description": "Number of seconds to sleep before retrying an HTTP request. If this is a string, its |Duration|_ value can be prefixed with lin[:START[:MAX]] for `linear` or exp[:BASE[:START[:MAX]"
+    },
+    {
+      "path": "extractor.*.sleep-429",
+      "type": "text",
+      "default": 60,
+      "description": "Number of seconds to sleep when receiving a 429 Too Many Requests response before retrying the request. If this is a string, its |Duration|_ value can be prefixed with lin[:START[:"
+    },
+    {
+      "path": "extractor.*.sleep-request",
+      "type": "text",
+      "default": "0.5-1.5",
+      "description": "Minimal time interval in seconds between each HTTP request during data extraction."
+    },
+    {
+      "path": "extractor.*.username",
+      "type": "text",
+      "default": null,
+      "description": "The username and password to use when attempting to log in to another site. This is supported for aibooru () ao3 aryion atfbooru () bluesky booruvar () coomer danbooru () deviantar"
+    },
+    {
+      "path": "extractor.*.password",
+      "type": "text",
+      "default": null,
+      "description": "The username and password to use when attempting to log in to another site. This is supported for aibooru () ao3 aryion atfbooru () bluesky booruvar () coomer danbooru () deviantar"
+    },
+    {
+      "path": "extractor.*.init",
+      "type": "text",
+      "default": false,
+      "description": "| Controls when to initialize extractor internals. | ( postprocessors, archives, `path-` options, etc ) true Initialize everything immediately upon extractor start false | \"lazy\" I"
+    },
+    {
+      "path": "extractor.*.input",
+      "type": "boolean",
+      "default": null,
+      "description": "Allow prompting the user for interactive input."
+    },
+    {
+      "path": "extractor.*.netrc",
+      "type": "boolean",
+      "default": false,
+      "description": "Enable the use of |.netrc|_ authentication data."
+    },
+    {
+      "path": "extractor.*.cookies",
+      "type": "json",
+      "default": null,
+      "description": "Source to read additional cookies from. This can be The |Path|_ to a Mozilla/Netscape format cookies.txt file .. code:: json \"~/.local/share/cookies-instagram-com.txt\" An object sp"
+    },
+    {
+      "path": "extractor.*.cookies-select",
+      "type": "text",
+      "default": null,
+      "description": "Interpret extractor.cookies as a list of cookie sources and select one of them for each extractor run. .. code:: json [ \"~/.local/share/cookies-instagram-com-1.txt\", \"~/.local/shar"
+    },
+    {
+      "path": "extractor.*.cookies-update",
+      "type": "boolean",
+      "default": true,
+      "description": "Export session cookies in cookies.txt format. If this is a |Path|_, write cookies to the given file path. If this is true and `extractor..cookies`_ specifies the |Path|_ of a valid"
+    },
+    {
+      "path": "extractor.*.proxy",
+      "type": "json",
+      "default": null,
+      "description": "Proxy (or proxies) to be used for remote connections. If this is a string, it is the proxy URL for all outgoing requests. If this is an object, it is a scheme-to-proxy mapping to s"
+    },
+    {
+      "path": "extractor.*.proxy-env",
+      "type": "boolean",
+      "default": true,
+      "description": "Collect proxy configuration information from environment variables (HTTP_PROXY, HTTPS_PROXY, NO_PROXY) and Windows Registry settings."
+    },
+    {
+      "path": "extractor.*.source-address",
+      "type": "json",
+      "default": null,
+      "description": "Client-side IP address to bind to. | Can be either a simple string with just the local IP address | or a list with IP and explicit port number as elements."
+    },
+    {
+      "path": "extractor.*.user-agent",
+      "type": "text",
+      "default": "gallery-dl/VERSION",
+      "description": "User-Agent header value used for HTTP requests. Setting this value to \"browser\" will try to automatically detect and use the User-Agent header of the system's default browser. | St"
+    },
+    {
+      "path": "extractor.*.browser",
+      "type": "text",
+      "default": "firefox",
+      "description": "| Try to emulate a real browser (firefox or chrome) | by using its HTTP headers and TLS ciphers for HTTP requests by setting specialized defaults for user-agent headers ciphers Sup"
+    },
+    {
+      "path": "extractor.*.referer",
+      "type": "text",
+      "default": false,
+      "description": "Send Referer headers with all outgoing HTTP requests. If this is a string, send it as Referer instead of the extractor's root domain."
+    },
+    {
+      "path": "extractor.*.geo-bypass",
+      "type": "json",
+      "default": "auto",
+      "description": "Use a random IP as fake X-Forwarded-For header to try bypassing geographic restrictions. | Can be either ISO 3166-2 country codes | or IP blocks in CIDR notation."
+    },
+    {
+      "path": "extractor.*.headers",
+      "type": "json",
+      "default": null,
+      "description": "Additional HTTP headers to be sent with each HTTP request, To disable sending a header, set its value to null. Set this option to \"firefox\" or \"chrome\" to use these browser's defau"
+    },
+    {
+      "path": "extractor.*.ciphers",
+      "type": "json",
+      "default": null,
+      "description": "List of TLS/SSL cipher suites in OpenSSL cipher list format to be passed to ssl.SSLContext.set_ciphers() Set this option to \"firefox\" or \"chrome\" to use these browser's default cip"
+    },
+    {
+      "path": "extractor.*.tls12",
+      "type": "boolean",
+      "default": false,
+      "description": "Allow selecting TLS 1.2 cipher suites. Can be disabled to alter TLS fingerprints and potentially bypass Cloudflare blocks."
+    },
+    {
+      "path": "extractor.*.keywords",
+      "type": "json",
+      "default": null,
+      "description": "Additional name-value pairs to be added to each metadata dictionary."
+    },
+    {
+      "path": "extractor.*.keywords-default",
+      "type": "text",
+      "default": "None",
+      "description": "Default value used for missing or undefined keyword names in a `Format String`_."
+    },
+    {
+      "path": "extractor.*.keywords-eval",
+      "type": "boolean",
+      "default": false,
+      "description": "Evaluate each keywords and keywords-global string value as a `Format String`_."
+    },
+    {
+      "path": "extractor.*.keywords-global",
+      "type": "json",
+      "default": null,
+      "description": "Global name-value pairs to be added to each metadata dictionary."
+    },
+    {
+      "path": "extractor.*.metadata-url",
+      "type": "text",
+      "default": "_url",
+      "description": "Insert a file's download URL into its metadata dictionary as the given name. For example, setting this option to \"gdl_file_url\" will cause a new metadata field with name gdl_file_u"
+    },
+    {
+      "path": "extractor.*.metadata-path",
+      "type": "text",
+      "default": "_path",
+      "description": "Insert a reference to the current PathFormat data structure into metadata dictionaries as the given name. For example, setting this option to \"gdl_path\" would make it possible to a"
+    },
+    {
+      "path": "extractor.*.metadata-extractor",
+      "type": "text",
+      "default": "_extr",
+      "description": "Insert a reference to the current Extractor object into metadata dictionaries as the given name. .. _extractor..http-metadata:"
+    },
+    {
+      "path": "extractor.*.metadata-http",
+      "type": "text",
+      "default": null,
+      "description": "Insert an object containing a file's HTTP headers and filename, extension, and date parsed from them into metadata dictionaries as the given name. For example, setting this option "
+    },
+    {
+      "path": "extractor.*.metadata-version",
+      "type": "text",
+      "default": null,
+      "description": "Insert an object containing gallery-dl's version info into metadata dictionaries as the given name. The content of the object is as follows: .. code:: json { \"version\" : \"string\", "
+    },
+    {
+      "path": "extractor.*.category-transfer",
+      "type": "boolean",
+      "default": null,
+      "description": "Transfer an extractor's (sub)category values to all child extractors spawned by it, to let them inherit their parent's config options."
+    },
+    {
+      "path": "extractor.*.blacklist",
+      "type": "json",
+      "default": null,
+      "description": "A list of extractor identifiers to ignore (or allow) when spawning child extractors for unknown URLs, e.g. from reddit or plurk. Each identifier can be A category or basecategory n"
+    },
+    {
+      "path": "extractor.*.whitelist",
+      "type": "json",
+      "default": null,
+      "description": "A list of extractor identifiers to ignore (or allow) when spawning child extractors for unknown URLs, e.g. from reddit or plurk. Each identifier can be A category or basecategory n"
+    },
+    {
+      "path": "extractor.*.tags-blacklist",
+      "type": "json",
+      "default": null,
+      "description": "A list of tags to exclude/include for processed posts. | Posts containing a blacklisted tag or not containing any whitelisted tag, including all of their files, | will be ignored a"
+    },
+    {
+      "path": "extractor.*.tags-whitelist",
+      "type": "json",
+      "default": null,
+      "description": "A list of tags to exclude/include for processed posts. | Posts containing a blacklisted tag or not containing any whitelisted tag, including all of their files, | will be ignored a"
+    },
+    {
+      "path": "extractor.*.archive",
+      "type": "text",
+      "default": null,
+      "description": "File to store IDs of downloaded files in. Downloads of files already recorded in this archive file will be skipped. The resulting archive file is not a plain text file but an SQLit"
+    },
+    {
+      "path": "extractor.*.archive-event",
+      "type": "json",
+      "default": "file",
+      "description": "Event(s) for which IDs get written to an archive. Available Events file after skip"
+    },
+    {
+      "path": "extractor.*.archive-format",
+      "type": "text",
+      "default": null,
+      "description": "An alternative `Format String`_ to build archive IDs with."
+    },
+    {
+      "path": "extractor.*.archive-mode",
+      "type": "text",
+      "default": "file",
+      "description": "Controls when to write archive IDs to the archive database. \"file\" Write IDs immediately after completing or skipping a file download. \"memory\" Keep IDs in memory and only write th"
+    },
+    {
+      "path": "extractor.*.archive-prefix",
+      "type": "text",
+      "default": null,
+      "description": "Prefix for archive IDs."
+    },
+    {
+      "path": "extractor.*.archive-pragma",
+      "type": "json",
+      "default": null,
+      "description": "A list of SQLite PRAGMA statements to run during archive initialization. See `<https://www.sqlite.org/pragma.html#toc>`__ for available PRAGMA statements and further details."
+    },
+    {
+      "path": "extractor.*.archive-table",
+      "type": "text",
+      "default": "archive",
+      "description": "`Format String`_ selecting the archive database table name."
+    },
+    {
+      "path": "extractor.*.actions",
+      "type": "json",
+      "default": null,
+      "description": "Perform an Action_ when logging a message matched by pattern. pattern is parsed as severity level (debug, info, warning, error, or integer value) followed by an optional Python Reg"
+    },
+    {
+      "path": "extractor.*.postprocessors",
+      "type": "json",
+      "default": null,
+      "description": "A list of post processors to be applied to each downloaded file in the specified order. | Unlike other options, a |postprocessors|_ setting at a deeper level does not override any "
+    },
+    {
+      "path": "extractor.*.postprocessor-options",
+      "type": "json",
+      "default": null,
+      "description": "Additional `Postprocessor Options`_ that get added to each individual post processor object before initializing it and evaluating filters."
+    },
+    {
+      "path": "extractor.*.retries",
+      "type": "integer",
+      "default": 4,
+      "description": "Maximum number of times a failed HTTP request is retried before giving up, or -1 for infinite retries."
+    },
+    {
+      "path": "extractor.*.retry-codes",
+      "type": "integer",
+      "default": null,
+      "description": "Additional HTTP response status codes to retry an HTTP request on. 2xx codes (success responses) and 3xx codes (redirection messages) will never be retried and always count as succ"
+    },
+    {
+      "path": "extractor.*.timeout",
+      "type": "text",
+      "default": 30.0,
+      "description": "Amount of time (in seconds) to wait for a successful connection and response from a remote server. This value gets internally used as the |timeout|_ parameter for the |requests.req"
+    },
+    {
+      "path": "extractor.*.verify",
+      "type": "text",
+      "default": true,
+      "description": "Controls whether to verify SSL/TLS certificates for HTTPS requests. If this is a string, it must be the path to a CA bundle to use instead of the default certificates. This value g"
+    },
+    {
+      "path": "extractor.*.truststore",
+      "type": "boolean",
+      "default": false,
+      "description": "| Use a truststore SSLContext for verifying SSL/TLS certificates | to make use of your system's native certificate stores instead of relying on certifi certificates."
+    },
+    {
+      "path": "extractor.*.download",
+      "type": "boolean",
+      "default": true,
+      "description": "Controls whether to download media files. Setting this to false won't download any files, but all other functions (`postprocessors`_, `download archive`_, etc.) will be executed as"
+    },
+    {
+      "path": "extractor.*.fallback",
+      "type": "boolean",
+      "default": true,
+      "description": "Use fallback download URLs when a download fails. .. _extractor..image-range:"
+    },
+    {
+      "path": "extractor.*.file-range",
+      "type": "json",
+      "default": null,
+      "description": "Index range(s) selecting which files to download. These can be specified as index: 3 (file number 3) range: 2-4 (files 2, 3, and 4) slice: 3:8:2 (files 3, 5, and 7) | Arguments for"
+    },
+    {
+      "path": "extractor.*.post-range",
+      "type": "text",
+      "default": null,
+      "description": "Like file-range, but for posts. .. _extractor..chapter-range:"
+    },
+    {
+      "path": "extractor.*.child-range",
+      "type": "text",
+      "default": null,
+      "description": "Like file-range, but for child extractors handling manga chapters, external URLs, etc. .. _extractor..image-filter:"
+    },
+    {
+      "path": "extractor.*.file-filter",
+      "type": "json",
+      "default": null,
+      "description": "Python Expression_ controlling which files to download. A file only gets downloaded when all of the given Expressions_ evaluate to True. Available values are the filename-specific "
+    },
+    {
+      "path": "extractor.*.post-filter",
+      "type": "json",
+      "default": null,
+      "description": "Like file-filter, but for posts. Available values are the directory-specific ones listed by -K or -j. .. _extractor..chapter-filter:"
+    },
+    {
+      "path": "extractor.*.child-filter",
+      "type": "json",
+      "default": null,
+      "description": "Like file-filter, but for child extractors handling manga chapters, external URLs, etc. .. _extractor..image-unique:"
+    },
+    {
+      "path": "extractor.*.file-unique",
+      "type": "boolean",
+      "default": false,
+      "description": "Ignore file URLs that have been encountered before during the current extractor run. .. _extractor..chapter-unique:"
+    },
+    {
+      "path": "extractor.*.child-unique",
+      "type": "boolean",
+      "default": false,
+      "description": "Like file-unique, but applies to delegated URLs like manga chapters, etc."
+    },
+    {
+      "path": "extractor.*.date-before",
+      "type": "text",
+      "default": null,
+      "description": "Process only posts created `before` this |Date|_. Accepted values are |ISO 8601| dates and Unix timestamps."
+    },
+    {
+      "path": "extractor.*.date-after",
+      "type": "text",
+      "default": null,
+      "description": "| Process only posts created `after` this |Date|_. | Stop extraction when encountering a post created before or equal to this |Date|_. Accepted values are |ISO 8601| dates and Unix"
+    },
+    {
+      "path": "extractor.*.write-pages",
+      "type": "text",
+      "default": false,
+      "description": "During data extraction, write received HTTP request data to enumerated files in the current working directory."
+    },
+    {
+      "path": "extractor.ao3.formats",
+      "type": "json",
+      "default": "pdf",
+      "description": "Format(s) to download."
+    },
+    {
+      "path": "extractor.arcalive.emoticons",
+      "type": "boolean",
+      "default": false,
+      "description": "Download emoticon images."
+    },
+    {
+      "path": "extractor.arcalive.gifs",
+      "type": "text",
+      "default": true,
+      "description": "Try to download .gif versions of .mp4 videos. true | \"fallback Use the .gif version as primary URL and provide the .mp4 one as fallback. \"check\" Check whether a .gif version is ava"
+    },
+    {
+      "path": "extractor.artstation.external",
+      "type": "boolean",
+      "default": false,
+      "description": "Try to follow external URLs of embedded players."
+    },
+    {
+      "path": "extractor.artstation.max-posts",
+      "type": "integer",
+      "default": null,
+      "description": "Limit the number of posts/projects to download."
+    },
+    {
+      "path": "extractor.artstation.mviews",
+      "type": "boolean",
+      "default": true,
+      "description": "Download .mview files."
+    },
+    {
+      "path": "extractor.artstation.previews",
+      "type": "boolean",
+      "default": false,
+      "description": "Download embed previews."
+    },
+    {
+      "path": "extractor.artstation.videos",
+      "type": "boolean",
+      "default": true,
+      "description": "Download video clips."
+    },
+    {
+      "path": "extractor.artstation.search.pro-first",
+      "type": "boolean",
+      "default": true,
+      "description": "Enable the \"Show Studio and Pro member artwork first\" checkbox when retrieving search results."
+    },
+    {
+      "path": "extractor.aryion.recursive",
+      "type": "boolean",
+      "default": true,
+      "description": "Controls the post extraction strategy. true Start on users' main gallery pages and recursively descend into subfolders false Get posts from \"Latest Updates\" pages"
+    },
+    {
+      "path": "extractor.bbc.width",
+      "type": "integer",
+      "default": 1920,
+      "description": "Specifies the requested image width. This value must be divisble by 16 and gets rounded down otherwise. The maximum possible value appears to be 1920."
+    },
+    {
+      "path": "extractor.behance.modules",
+      "type": "json",
+      "default": [
+        "image",
+        "video",
+        "mediacollection",
+        "embed"
+      ],
+      "description": "Selects which gallery modules to download from. Supported Types \"image\" \"video\" \"mediacollection\" \"embed\" \"text\""
+    },
+    {
+      "path": "extractor.bellazon.order-posts",
+      "type": "text",
+      "default": "desc",
+      "description": "Controls the order in which posts of a thread are processed. \"asc\" Ascending order (oldest first) \"desc\" | \"reverse\" Descending order (newest first)"
+    },
+    {
+      "path": "extractor.bellazon.quoted",
+      "type": "boolean",
+      "default": false,
+      "description": "Extract files from quoted content."
+    },
+    {
+      "path": "extractor.bilibili.livephoto",
+      "type": "boolean",
+      "default": true,
+      "description": "Download livephoto files."
+    },
+    {
+      "path": "extractor.[blogger].api-key",
+      "type": "text",
+      "default": null,
+      "description": "Custom Blogger API key. https://developers.google.com/blogger/docs/3.0/using#APIKey"
+    },
+    {
+      "path": "extractor.[blogger].videos",
+      "type": "boolean",
+      "default": true,
+      "description": "Download embedded videos hosted on https://www.blogger.com/"
+    },
+    {
+      "path": "extractor.bluesky.api-server",
+      "type": "text",
+      "default": null,
+      "description": "Server address for API requests. Can be used when self-hosting a PDS"
+    },
+    {
+      "path": "extractor.bluesky.include",
+      "type": "json",
+      "default": null,
+      "description": "A (comma-separated) list of subcategories to include when processing a user profile."
+    },
+    {
+      "path": "extractor.bluesky.likes.endpoint",
+      "type": "text",
+      "default": "listRecords",
+      "description": "API endpoint to use for retrieving liked posts. \"listRecords\" | Use the results from com.atproto.repo.listRecords | Requires no login and alows accessing likes of all users, but us"
+    },
+    {
+      "path": "extractor.bluesky.metadata",
+      "type": "json",
+      "default": false,
+      "description": "Extract additional metadata. facets hashtags, mentions, uris user | Detailed user metadata for the user referenced in the input URL. | (app.bsky.actor.getProfile)"
+    },
+    {
+      "path": "extractor.bluesky.post.depth",
+      "type": "text",
+      "default": null,
+      "description": ""
+    },
+    {
+      "path": "extractor.bluesky.likes.depth",
+      "type": "integer",
+      "default": 0,
+      "description": "Sets the maximum depth of returned reply posts. (See the depth parameter of app.bsky.feed.getPostThread)"
+    },
+    {
+      "path": "extractor.bluesky.quoted",
+      "type": "boolean",
+      "default": false,
+      "description": "Fetch media from quoted posts."
+    },
+    {
+      "path": "extractor.bluesky.reposts",
+      "type": "boolean",
+      "default": false,
+      "description": "Process reposts."
+    },
+    {
+      "path": "extractor.bluesky.videos",
+      "type": "boolean",
+      "default": true,
+      "description": "Download videos."
+    },
+    {
+      "path": "extractor.boosty.allowed",
+      "type": "boolean",
+      "default": true,
+      "description": "Request only available posts."
+    },
+    {
+      "path": "extractor.boosty.bought",
+      "type": "boolean",
+      "default": false,
+      "description": "Request only purchased posts for feed results."
+    },
+    {
+      "path": "extractor.boosty.metadata",
+      "type": "boolean",
+      "default": false,
+      "description": "Provide detailed user metadata."
+    },
+    {
+      "path": "extractor.boosty.videos",
+      "type": "json",
+      "default": true,
+      "description": "Download videos. If this is a list, it selects which format to try to download. Possible Formats ultra_hd (2160p) quad_hd (1440p) full_hd (1080p) high (720p) medium (480p) low (360"
+    },
+    {
+      "path": "extractor.booth.strategy",
+      "type": "text",
+      "default": "webpage",
+      "description": "Selects how to handle and extract file URLs. \"webpage\" Retrieve the full HTML page and extract file URLs from it \"fallback\" Use fallback URLs to `guess` each file's correct filenam"
+    },
+    {
+      "path": "extractor.bunkr.endpoint",
+      "type": "text",
+      "default": "/api/_001_v2",
+      "description": "API endpoint for retrieving file URLs."
+    },
+    {
+      "path": "extractor.bunkr.tlds",
+      "type": "boolean",
+      "default": false,
+      "description": "Controls which bunkr TLDs to accept. true Match URLs with all possible TLDs (e.g. bunkr.xyz or bunkrrr.duck) false Match only URLs with known TLDs"
+    },
+    {
+      "path": "extractor.[chevereto].password",
+      "type": "json",
+      "default": null,
+      "description": "Password value(s) used to access protected albums."
+    },
+    {
+      "path": "extractor.cien.files",
+      "type": "json",
+      "default": [
+        "image",
+        "video",
+        "download",
+        "gallery"
+      ],
+      "description": "Determines the type and order of files to download. Available Types image video cover download gallery"
+    },
+    {
+      "path": "extractor.civitai.api",
+      "type": "text",
+      "default": "trpc",
+      "description": "Selects which API endpoints to use. \"rest\" Public REST API \"trpc\" Internal tRPC API"
+    },
+    {
+      "path": "extractor.civitai.api-key",
+      "type": "text",
+      "default": null,
+      "description": "The API Key value generated in your User Account Settings to make authorized API requests. See API/Authorization for details."
+    },
+    {
+      "path": "extractor.civitai.files",
+      "type": "json",
+      "default": [
+        "image"
+      ],
+      "description": "Determines the type and order of files to download when processing models. Available Types model image gallery"
+    },
+    {
+      "path": "extractor.civitai.include",
+      "type": "json",
+      "default": [
+        "user-images",
+        "user-videos"
+      ],
+      "description": "A (comma-separated) list of subcategories to include when processing a user profile."
+    },
+    {
+      "path": "extractor.civitai.metadata",
+      "type": "json",
+      "default": false,
+      "description": "Extract additional metadata."
+    },
+    {
+      "path": "extractor.civitai.nsfw",
+      "type": "text",
+      "default": true,
+      "description": "Download NSFW-rated images. For \"api\": \"rest\", this can be one of \"None\", \"Soft\", \"Mature\", \"X\" to set the highest returned mature content flag. For \"api\": \"trpc\", this can be an i"
+    },
+    {
+      "path": "extractor.civitai.period",
+      "type": "text",
+      "default": "AllTime",
+      "description": "Sets the period parameter when paginating over results."
+    },
+    {
+      "path": "extractor.civitai.sort",
+      "type": "text",
+      "default": "Newest",
+      "description": "Sets the sort parameter when paginating over results."
+    },
+    {
+      "path": "extractor.civitai.quality",
+      "type": "json",
+      "default": "original=true",
+      "description": "A (comma-separated) list of image quality options to pass with every image URL. Known available options include original, quality, width"
+    },
+    {
+      "path": "extractor.civitai.quality-videos",
+      "type": "json",
+      "default": "original=true,quality=100",
+      "description": "A (comma-separated) list of video quality options to pass with every video URL. Known available options include original, quality, transcode Use + as first character to `add` the g"
+    },
+    {
+      "path": "extractor.civitai.search-models.token",
+      "type": "text",
+      "default": null,
+      "description": ""
+    },
+    {
+      "path": "extractor.civitai.search-images.token",
+      "type": "text",
+      "default": "8c46eb2508e21db1e9828a97968d91ab1ca1caa5f70a00e88a2ba1e286603b61",
+      "description": "Authorization header value used for `/multi-search` queries."
+    },
+    {
+      "path": "extractor.comick.lang",
+      "type": "json",
+      "default": null,
+      "description": "|ISO 639-1| code(s) to filter chapters by."
+    },
+    {
+      "path": "extractor.coomer.files",
+      "type": "json",
+      "default": [
+        "file",
+        "attachments",
+        "inline"
+      ],
+      "description": "Determines the type and order of files to be downloaded. Available Types file attachments inline"
+    },
+    {
+      "path": "extractor.cyberdrop.domain",
+      "type": "text",
+      "default": null,
+      "description": "Specifies the domain used by cyberdrop regardless of input URL. Setting this option to \"auto\" uses the same domain as a given input URL."
+    },
+    {
+      "path": "extractor.cyberfile.password",
+      "type": "text",
+      "default": "",
+      "description": "Password value used to access protected files and folders. Leave this value empty or undefined to be interactively prompted for a password when needed (see getpass())."
+    },
+    {
+      "path": "extractor.cyberfile.recursive",
+      "type": "boolean",
+      "default": true,
+      "description": "Recursively download files from subfolders."
+    },
+    {
+      "path": "extractor.[Danbooru].external",
+      "type": "boolean",
+      "default": false,
+      "description": "For unavailable or restricted posts, follow the source and download from there if possible."
+    },
+    {
+      "path": "extractor.[Danbooru].pool.order-posts",
+      "type": "text",
+      "default": null,
+      "description": ""
+    },
+    {
+      "path": "extractor.[Danbooru].favgroup.order-posts",
+      "type": "text",
+      "default": "pool",
+      "description": "Controls the order in which pool/favgroup posts are returned. \"pool\" | \"pool_asc\" | \"asc\" | \"asc_pool\" Pool order \"pool_desc\" | \"desc_pool\" | \"desc\" Reverse Pool order \"id\" | \"id_d"
+    },
+    {
+      "path": "extractor.[Danbooru].ugoira",
+      "type": "boolean",
+      "default": false,
+      "description": "Controls the download target for Ugoira posts. true ZIP archives false Converted video files"
+    },
+    {
+      "path": "extractor.[Danbooru].metadata",
+      "type": "json",
+      "default": false,
+      "description": "Extract additional metadata (notes, artist commentary, parent, children, uploader) It is possible to specify a custom list of metadata includes. See available_includes for possible"
+    },
+    {
+      "path": "extractor.[Danbooru].threshold",
+      "type": "text",
+      "default": "auto",
+      "description": "Stop paginating over API results if the length of a batch of returned posts is less than the specified number. Defaults to the per-page limit of the current instance, which is 200."
+    },
+    {
+      "path": "extractor.dankefuerslesen.zip",
+      "type": "boolean",
+      "default": false,
+      "description": "Download each chapter as a single ZIP archive instead of individual images."
+    },
+    {
+      "path": "extractor.deviantart.auto-watch",
+      "type": "boolean",
+      "default": false,
+      "description": "Automatically watch users when encountering \"Watchers-Only Deviations\" (requires a refresh-token)."
+    },
+    {
+      "path": "extractor.deviantart.auto-unwatch",
+      "type": "boolean",
+      "default": false,
+      "description": "After watching a user through auto-watch, unwatch that user at the end of the current extractor run."
+    },
+    {
+      "path": "extractor.deviantart.comments",
+      "type": "boolean",
+      "default": false,
+      "description": "Extract comments metadata."
+    },
+    {
+      "path": "extractor.deviantart.comments-avatars",
+      "type": "boolean",
+      "default": false,
+      "description": "Download the avatar of each commenting user."
+    },
+    {
+      "path": "extractor.deviantart.extra",
+      "type": "boolean",
+      "default": false,
+      "description": "Download extra Sta.sh resources from description texts and journals."
+    },
+    {
+      "path": "extractor.deviantart.flat",
+      "type": "boolean",
+      "default": true,
+      "description": "Select the directory structure created by the Gallery- and Favorite-Extractors. true Use a flat directory structure. false Collect a list of all gallery folders or favorites collec"
+    },
+    {
+      "path": "extractor.deviantart.folders",
+      "type": "boolean",
+      "default": false,
+      "description": "Provide a folders metadata field that contains the names of all folders a deviation is present in."
+    },
+    {
+      "path": "extractor.deviantart.group",
+      "type": "text",
+      "default": true,
+      "description": "Check whether the profile name in a given URL belongs to a group or a regular user. When disabled, assume every given profile name belongs to a regular user."
+    },
+    {
+      "path": "extractor.deviantart.include",
+      "type": "json",
+      "default": "gallery",
+      "description": "A (comma-separated) list of subcategories to include when processing a user profile."
+    },
+    {
+      "path": "extractor.deviantart.intermediary",
+      "type": "boolean",
+      "default": true,
+      "description": "For older non-downloadable images, download a higher-quality /intermediary/ version."
+    },
+    {
+      "path": "extractor.deviantart.journals",
+      "type": "text",
+      "default": "html",
+      "description": "Selects the output format for textual content. This includes journals, literature and status updates. \"html\" HTML with (roughly) the same layout as on DeviantArt. \"text\" Plain text"
+    },
+    {
+      "path": "extractor.deviantart.mature",
+      "type": "boolean",
+      "default": true,
+      "description": "Enable mature content. This option simply sets the |mature_content|_ parameter for API calls to either \"true\" or \"false\" and does not do any other form of content filtering."
+    },
+    {
+      "path": "extractor.deviantart.metadata",
+      "type": "json",
+      "default": false,
+      "description": "Extract additional metadata for deviation objects. Provides description, tags, license, and is_watching fields when enabled. It is possible to request extended metadata by specifyi"
+    },
+    {
+      "path": "extractor.deviantart.original",
+      "type": "text",
+      "default": false,
+      "description": "Download original files if available. Setting this option to \"images\" only downloads original files if they are images and falls back to preview versions for everything else (archi"
+    },
+    {
+      "path": "extractor.deviantart.pagination",
+      "type": "text",
+      "default": "api",
+      "description": "Controls when to stop paginating over API results. \"api\" Trust the API and stop when has_more is false. \"manual\" Disregard has_more and only stop when a batch of results is empty."
+    },
+    {
+      "path": "extractor.deviantart.previews",
+      "type": "boolean",
+      "default": false,
+      "description": "For non-image files (archives, videos, etc.), also download the file's preview image. Set this option to \"all\" to download previews for all files."
+    },
+    {
+      "path": "extractor.deviantart.public",
+      "type": "boolean",
+      "default": true,
+      "description": "Use a public access token for API requests. Disable this option to force using a private token for all requests when a refresh token is provided."
+    },
+    {
+      "path": "extractor.deviantart.quality",
+      "type": "text",
+      "default": 100,
+      "description": "JPEG quality level of images for which an original file download is not available. Set this to \"png\" to download a PNG version of these images instead."
+    },
+    {
+      "path": "extractor.deviantart.refresh-token",
+      "type": "text",
+      "default": null,
+      "description": "The refresh-token value you get from linking your DeviantArt account to gallery-dl. Using a refresh-token allows you to access private or otherwise not publicly available deviation"
+    },
+    {
+      "path": "extractor.deviantart.wait-min",
+      "type": "integer",
+      "default": 0,
+      "description": "Minimum wait time in seconds before API requests."
+    },
+    {
+      "path": "extractor.deviantart.avatar.formats",
+      "type": "json",
+      "default": null,
+      "description": "Avatar URL formats to return. | Each format is parsed as SIZE.EXT. | Leave SIZE empty to download the regular, small avatar format."
+    },
+    {
+      "path": "extractor.deviantart.folder.subfolders",
+      "type": "boolean",
+      "default": true,
+      "description": "Also extract subfolder content."
+    },
+    {
+      "path": "extractor.discord.embeds",
+      "type": "json",
+      "default": [
+        "image",
+        "gifv",
+        "video"
+      ],
+      "description": "Selects which embed types to download from. Supported embed types are image, gifv, video, rich, article, link."
+    },
+    {
+      "path": "extractor.discord.threads",
+      "type": "boolean",
+      "default": true,
+      "description": "Extract threads from Discord text channels."
+    },
+    {
+      "path": "extractor.discord.token",
+      "type": "text",
+      "default": null,
+      "description": "Discord Bot Token for API requests. You can follow this guide to get a token."
+    },
+    {
+      "path": "extractor.dynastyscans.anthology.metadata",
+      "type": "boolean",
+      "default": false,
+      "description": "Extract alert, description, and status metadata from an anthology's HTML page."
+    },
+    {
+      "path": "extractor.[E621].metadata",
+      "type": "json",
+      "default": false,
+      "description": "Extract additional metadata (notes, pool metadata) if available."
+    },
+    {
+      "path": "extractor.[E621].threshold",
+      "type": "text",
+      "default": "auto",
+      "description": "Stop paginating over API results if the length of a batch of returned posts is less than the specified number. Defaults to the per-page limit of the current instance, which is 320."
+    },
+    {
+      "path": "extractor.erome.user.reposts",
+      "type": "boolean",
+      "default": false,
+      "description": "Include reposts when extracting albums from a user profile."
+    },
+    {
+      "path": "extractor.facebook.author-followups",
+      "type": "boolean",
+      "default": false,
+      "description": ""
+    },
+    {
+      "path": "extractor.facebook.include",
+      "type": "json",
+      "default": "photos",
+      "description": "A (comma-separated) list of subcategories to include when processing a user profile."
+    },
+    {
+      "path": "extractor.facebook.loop",
+      "type": "boolean",
+      "default": false,
+      "description": "Continue when detecting a jump to a set's beginning."
+    },
+    {
+      "path": "extractor.facebook.videos",
+      "type": "text",
+      "default": true,
+      "description": "Control video download behavior. true Extract and download video & audio separately. \"ytdl\" Let |ytdl| handle video extraction and download, and merge video & audio streams. false "
+    },
+    {
+      "path": "extractor.fanbox.comments",
+      "type": "boolean",
+      "default": false,
+      "description": "Extract comments metadata."
+    },
+    {
+      "path": "extractor.fanbox.embeds",
+      "type": "text",
+      "default": true,
+      "description": "Control behavior on embedded content from external sites. true Extract embed URLs and download them if supported (videos are not downloaded). \"ytdl\" Like true, but let |ytdl| handl"
+    },
+    {
+      "path": "extractor.fanbox.fee-max",
+      "type": "integer",
+      "default": null,
+      "description": "Do not request API data or extract files from posts that require a fee (feeRequired) greater than the specified amount."
+    },
+    {
+      "path": "extractor.fanbox.metadata",
+      "type": "json",
+      "default": false,
+      "description": "Extract plan and extended user metadata. Supported Fields comments plan user"
+    },
+    {
+      "path": "extractor.fanbox.creator.offset",
+      "type": "integer",
+      "default": 0,
+      "description": "Custom offset starting value when paginating over posts."
+    },
+    {
+      "path": "extractor.fansly.formats",
+      "type": "integer",
+      "default": null,
+      "description": "List of file formats to consider during format selection."
+    },
+    {
+      "path": "extractor.fansly.previews",
+      "type": "boolean",
+      "default": true,
+      "description": "Download `previews` if no other format is available."
+    },
+    {
+      "path": "extractor.fansly.token",
+      "type": "text",
+      "default": null,
+      "description": "authorization header value used for requests to https://apiv3.fansly.com/api to access locked content."
+    },
+    {
+      "path": "extractor.flickr.access-token",
+      "type": "text",
+      "default": null,
+      "description": "The access_token and access_token_secret values you get from linking your Flickr account to gallery-dl."
+    },
+    {
+      "path": "extractor.flickr.access-token-secret",
+      "type": "text",
+      "default": null,
+      "description": "The access_token and access_token_secret values you get from linking your Flickr account to gallery-dl."
+    },
+    {
+      "path": "extractor.flickr.contexts",
+      "type": "boolean",
+      "default": false,
+      "description": "For each photo, return the albums and pools it belongs to as set and pool metadata."
+    },
+    {
+      "path": "extractor.flickr.exif",
+      "type": "boolean",
+      "default": false,
+      "description": "For each photo, return its EXIF/TIFF/GPS tags as exif and camera metadata."
+    },
+    {
+      "path": "extractor.flickr.info",
+      "type": "boolean",
+      "default": false,
+      "description": "For each photo, retrieve its \"full\" metadata as provided by flickr.photos.getInfo"
+    },
+    {
+      "path": "extractor.flickr.metadata",
+      "type": "json",
+      "default": false,
+      "description": "Extract additional metadata (license, date_taken, original_format, last_update, geo, machine_tags, o_dims) It is possible to specify a custom list of metadata includes. See the ext"
+    },
+    {
+      "path": "extractor.flickr.profile",
+      "type": "boolean",
+      "default": false,
+      "description": "Extract additional user profile metadata."
+    },
+    {
+      "path": "extractor.flickr.videos",
+      "type": "boolean",
+      "default": true,
+      "description": "Extract and download videos."
+    },
+    {
+      "path": "extractor.flickr.size-max",
+      "type": "text",
+      "default": null,
+      "description": "Sets the maximum allowed size for downloaded images. If this is an integer, it specifies the maximum image dimension (width and height) in pixels. If this is a string, it should be"
+    },
+    {
+      "path": "extractor.foriio.audio",
+      "type": "boolean",
+      "default": true,
+      "description": "Download embedded audio files using |ytdl| in sound works"
+    },
+    {
+      "path": "extractor.foriio.external",
+      "type": "boolean",
+      "default": true,
+      "description": "Follow external URLs in web_article works"
+    },
+    {
+      "path": "extractor.foriio.user.posts",
+      "type": "json",
+      "default": null,
+      "description": "Only process works of the given types."
+    },
+    {
+      "path": "extractor.foriio.previews",
+      "type": "boolean",
+      "default": false,
+      "description": "Download preview images of embedded media."
+    },
+    {
+      "path": "extractor.foriio.videos",
+      "type": "boolean",
+      "default": true,
+      "description": "Download embedded (YouTube) videos using |ytdl| in video works"
+    },
+    {
+      "path": "extractor.furaffinity.descriptions",
+      "type": "text",
+      "default": "text",
+      "description": "Controls the format of description metadata fields. \"text\" Plain text with HTML tags removed \"html\" Raw HTML content"
+    },
+    {
+      "path": "extractor.furaffinity.external",
+      "type": "boolean",
+      "default": false,
+      "description": "Follow external URLs linked in descriptions."
+    },
+    {
+      "path": "extractor.furaffinity.include",
+      "type": "json",
+      "default": "gallery",
+      "description": "A (comma-separated) list of subcategories to include when processing a user profile."
+    },
+    {
+      "path": "extractor.furaffinity.layout",
+      "type": "text",
+      "default": "auto",
+      "description": "Selects which site layout to expect when parsing posts. \"auto\" Automatically differentiate between \"old\" and \"new\" \"old\" Expect the old site layout \"new\" Expect the new site layout"
+    },
+    {
+      "path": "extractor.gelbooru.api-key",
+      "type": "text",
+      "default": null,
+      "description": "Values from the `API Access Credentials` section found at the bottom of your account's Options page."
+    },
+    {
+      "path": "extractor.gelbooru.user-id",
+      "type": "text",
+      "default": null,
+      "description": "Values from the `API Access Credentials` section found at the bottom of your account's Options page."
+    },
+    {
+      "path": "extractor.gelbooru.favorite.order-posts",
+      "type": "text",
+      "default": "desc",
+      "description": "Controls the order in which favorited posts are returned. \"asc\" Ascending favorite date order (oldest first) \"desc\" | \"reverse\" Descending favorite date order (newest first)"
+    },
+    {
+      "path": "extractor.generic.enabled",
+      "type": "boolean",
+      "default": false,
+      "description": "Match all URLs not otherwise supported by gallery-dl, even ones without a generic: prefix."
+    },
+    {
+      "path": "extractor.gofile.api-token",
+      "type": "text",
+      "default": null,
+      "description": "API token value found at the bottom of your profile page. If not set, a temporary guest token will be used."
+    },
+    {
+      "path": "extractor.gofile.website-token",
+      "type": "text",
+      "default": null,
+      "description": "API token value used during API requests. An invalid or not up-to-date value will result in 401 Unauthorized errors. Keeping this option unset will use an extra HTTP request to att"
+    },
+    {
+      "path": "extractor.gofile.recursive",
+      "type": "boolean",
+      "default": true,
+      "description": "Recursively download files from subfolders."
+    },
+    {
+      "path": "extractor.imagechest.access-token",
+      "type": "text",
+      "default": null,
+      "description": "Your personal Image Chest access token. These tokens allow using the API instead of having to scrape HTML pages, providing more detailed metadata. (date, description, etc) See http"
+    },
+    {
+      "path": "extractor.imgur.client-id",
+      "type": "text",
+      "default": null,
+      "description": "Custom Client ID value for API requests."
+    },
+    {
+      "path": "extractor.imgur.mp4",
+      "type": "text",
+      "default": true,
+      "description": "Controls whether to choose the GIF or MP4 version of an animation. true Follow Imgur's advice and choose MP4 if the prefer_video flag in an image's metadata is set. false Always ch"
+    },
+    {
+      "path": "extractor.inkbunny.orderby",
+      "type": "text",
+      "default": "create_datetime",
+      "description": "Value of the orderby parameter for submission searches. (See API#Search for details)"
+    },
+    {
+      "path": "extractor.instagram.api",
+      "type": "text",
+      "default": "rest",
+      "description": "Selects which API endpoints to use. \"rest\" REST API - higher-resolution media \"graphql\" GraphQL API - lower-resolution media"
+    },
+    {
+      "path": "extractor.instagram.audio",
+      "type": "boolean",
+      "default": false,
+      "description": "Download background music files."
+    },
+    {
+      "path": "extractor.instagram.cursor",
+      "type": "text",
+      "default": true,
+      "description": "Controls from which position to start the extraction process from. true | Start from the beginning. | Log the most recent cursor value when interrupted before reaching the end. fal"
+    },
+    {
+      "path": "extractor.instagram.include",
+      "type": "json",
+      "default": "posts",
+      "description": "A (comma-separated) list of subcategories to include when processing a user profile."
+    },
+    {
+      "path": "extractor.instagram.max-posts",
+      "type": "integer",
+      "default": null,
+      "description": "Limit the number of posts to download."
+    },
+    {
+      "path": "extractor.instagram.metadata",
+      "type": "boolean",
+      "default": false,
+      "description": "Provide extended user metadata even when referring to a user by ID, e.g. instagram.com/id:12345678."
+    },
+    {
+      "path": "extractor.instagram.order-files",
+      "type": "text",
+      "default": "asc",
+      "description": "Controls the order in which files of each post are returned. \"asc\" Same order as displayed in a post \"desc\" | \"reverse\" Reverse order as displayed in a post"
+    },
+    {
+      "path": "extractor.instagram.order-posts",
+      "type": "text",
+      "default": "asc",
+      "description": "Controls the order in which posts are returned. \"asc\" Same order as displayed \"desc\" | \"reverse\" Reverse order as displayed \"id\" or \"id_asc\" Ascending order by ID \"id_desc\" Descend"
+    },
+    {
+      "path": "extractor.instagram.previews",
+      "type": "json",
+      "default": false,
+      "description": "Download video previews and audio covers."
+    },
+    {
+      "path": "extractor.instagram.static-videos",
+      "type": "boolean",
+      "default": true,
+      "description": "Download static story/highlight \"videos\" generated from a photo. Disabling this option downloads the photo version instead."
+    },
+    {
+      "path": "extractor.instagram.user-cache",
+      "type": "text",
+      "default": "disk",
+      "description": "Selects how to cache user profile data. true | \"disk\" Cache user data on disk false | \"memory\" Cache user data in memory"
+    },
+    {
+      "path": "extractor.instagram.user-strategy",
+      "type": "json",
+      "default": [
+        "search",
+        "web"
+      ],
+      "description": "Selects how to retrieve user IDs and profile data. \"search\" | \"topsearch\" Use `topsearch` API results \"info\" | \"web_profile_info\" | Use `web_profile_info` API results | (high likly"
+    },
+    {
+      "path": "extractor.instagram.videos",
+      "type": "text",
+      "default": true,
+      "description": "Controls video download behavior. true | \"dash\" | \"ytdl\" Download videos from video_dash_manifest data using |ytdl| \"merged\" Download pre-merged video formats false Do not download"
+    },
+    {
+      "path": "extractor.instagram.warn-images",
+      "type": "text",
+      "default": true,
+      "description": "Show a warning when downloading images with a resolution smaller than the `original`. true Show a warning when at least one dimension is smaller than the reported `original` resolu"
+    },
+    {
+      "path": "extractor.instagram.warn-videos",
+      "type": "boolean",
+      "default": true,
+      "description": "Show a warning when downloading videos with a User-Agent header causing potentially lowered video quality."
+    },
+    {
+      "path": "extractor.instagram.stories.split",
+      "type": "boolean",
+      "default": false,
+      "description": "Split stories elements into separate posts."
+    },
+    {
+      "path": "extractor.itaku.include",
+      "type": "json",
+      "default": "gallery",
+      "description": "A (comma-separated) list of subcategories to include when processing a user profile."
+    },
+    {
+      "path": "extractor.itaku.order",
+      "type": "text",
+      "default": "desc",
+      "description": "Controls the order in which images/posts/users are returned. \"asc\" | \"reverse\" Ascending order (oldest first) \"desc\" Descending order (newest first) any other string Custom result "
+    },
+    {
+      "path": "extractor.itaku.videos",
+      "type": "boolean",
+      "default": true,
+      "description": "Download video files."
+    },
+    {
+      "path": "extractor.iwara.format",
+      "type": "json",
+      "default": null,
+      "description": "Selects the preferred format for video downloads. When more than one format is given, the first available one is selected."
+    },
+    {
+      "path": "extractor.iwara.include",
+      "type": "json",
+      "default": [
+        "user-images",
+        "user-videos"
+      ],
+      "description": "A (comma-separated) list of subcategories to include when processing a user profile."
+    },
+    {
+      "path": "extractor.joyreactor.embeds",
+      "type": "boolean",
+      "default": false,
+      "description": "Downlload embedded external videos with |ytdl|."
+    },
+    {
+      "path": "extractor.joyreactor.formats",
+      "type": "json",
+      "default": [
+        "webm"
+      ],
+      "description": "A (comma-separated) list of video formats to download."
+    },
+    {
+      "path": "extractor.joyreactor.metadata",
+      "type": "boolean",
+      "default": false,
+      "description": "Extract additional metadata."
+    },
+    {
+      "path": "extractor.joyreactor.videos",
+      "type": "boolean",
+      "default": true,
+      "description": "Download videos."
+    },
+    {
+      "path": "extractor.kemono.archives",
+      "type": "boolean",
+      "default": false,
+      "description": "Extract additional metadata for archives files, including file, file_list, and password."
+    },
+    {
+      "path": "extractor.kemono.archives-format",
+      "type": "text",
+      "default": "list",
+      "description": "Determines the format/type of the archives metadata field. \"list\" | \"array\" Plain list with archive files as elements \"dict\" | \"object\" A dict with each archive file's hash as key."
+    },
+    {
+      "path": "extractor.kemono.comments",
+      "type": "boolean",
+      "default": false,
+      "description": "Extract comments metadata."
+    },
+    {
+      "path": "extractor.kemono.duplicates",
+      "type": "json",
+      "default": false,
+      "description": "Controls how to handle duplicate files in a post. true Download duplicates false Ignore duplicates any list or string | Download a duplicate file if its type is in the given list |"
+    },
+    {
+      "path": "extractor.kemono.dms",
+      "type": "boolean",
+      "default": false,
+      "description": "Extract a user's direct messages as dms metadata."
+    },
+    {
+      "path": "extractor.kemono.announcements",
+      "type": "boolean",
+      "default": false,
+      "description": "Extract a user's announcements as announcements metadata."
+    },
+    {
+      "path": "extractor.kemono.endpoint",
+      "type": "text",
+      "default": "posts",
+      "description": "API endpoint to use for retrieving creator posts. \"posts\" | \"legacy\" Provides only limited metadata. \"posts+\" | \"legacy+\" Provides full metadata, but requires an additional API req"
+    },
+    {
+      "path": "extractor.kemono.favorites",
+      "type": "text",
+      "default": "artist",
+      "description": "Determines the type of favorites to be downloaded. Available types are artist, and post."
+    },
+    {
+      "path": "extractor.kemono.files",
+      "type": "json",
+      "default": [
+        "attachments",
+        "file",
+        "inline"
+      ],
+      "description": "Determines the type and order of files to be downloaded. Available Types file attachments inline"
+    },
+    {
+      "path": "extractor.kemono.max-posts",
+      "type": "integer",
+      "default": null,
+      "description": "Limit the number of posts to download."
+    },
+    {
+      "path": "extractor.kemono.metadata",
+      "type": "boolean",
+      "default": true,
+      "description": "Extract username and user_profile metadata."
+    },
+    {
+      "path": "extractor.kemono.revisions",
+      "type": "text",
+      "default": false,
+      "description": "Extract post revisions. Set this to \"unique\" to filter out duplicate revisions."
+    },
+    {
+      "path": "extractor.kemono.order-revisions",
+      "type": "text",
+      "default": "desc",
+      "description": "Controls the order in which revisions are returned. \"asc\" | \"reverse\" Ascending order (oldest first) \"desc\" Descending order (newest first)"
+    },
+    {
+      "path": "extractor.kemono.discord.order-posts",
+      "type": "text",
+      "default": "asc",
+      "description": "Controls the order in which discord posts are returned. \"asc\" Ascending order (oldest first) \"desc\" | \"reverse\" Descending order (newest first)"
+    },
+    {
+      "path": "extractor.khinsider.covers",
+      "type": "boolean",
+      "default": false,
+      "description": "Download album cover images."
+    },
+    {
+      "path": "extractor.khinsider.format",
+      "type": "text",
+      "default": "mp3",
+      "description": "The name of the preferred file format to download. Use \"all\" to download all available formats, or a (comma-separated) list to select multiple formats. If the selected format is no"
+    },
+    {
+      "path": "extractor.koofr.recursive",
+      "type": "boolean",
+      "default": true,
+      "description": "true Recursively descent into subfolders while downloading individual files. false Download shared `/links/` with multiple files as a single `.zip` file."
+    },
+    {
+      "path": "extractor.lolisafe.domain",
+      "type": "text",
+      "default": null,
+      "description": "Specifies the domain used by a lolisafe extractor regardless of input URL. Setting this option to \"auto\" uses the same domain as a given input URL."
+    },
+    {
+      "path": "extractor.luscious.gif",
+      "type": "boolean",
+      "default": false,
+      "description": "Format in which to download animated images. Use true to download animated images as gifs and false to download as mp4 videos."
+    },
+    {
+      "path": "extractor.mangadex.api-server",
+      "type": "text",
+      "default": "https://api.mangadex.org",
+      "description": "The server to use for API requests."
+    },
+    {
+      "path": "extractor.mangadex.api-parameters",
+      "type": "json",
+      "default": null,
+      "description": "Additional query parameters to send when fetching manga chapters. (See /manga/{id}/feed and /user/follows/manga/feed)"
+    },
+    {
+      "path": "extractor.mangadex.data-saver",
+      "type": "boolean",
+      "default": false,
+      "description": "Enable `Data Saver` mode and download lower quality versions of chapters."
+    },
+    {
+      "path": "extractor.mangadex.lang",
+      "type": "json",
+      "default": null,
+      "description": "|ISO 639-1| code(s) to filter chapters by."
+    },
+    {
+      "path": "extractor.mangadex.ratings",
+      "type": "json",
+      "default": [
+        "safe",
+        "suggestive",
+        "erotica",
+        "pornographic"
+      ],
+      "description": "List of acceptable content ratings for returned chapters."
+    },
+    {
+      "path": "extractor.mangadex.manga.covers",
+      "type": "boolean",
+      "default": false,
+      "description": "Download `manga` `cover` images."
+    },
+    {
+      "path": "extractor.mangafire.manga.lang",
+      "type": "text",
+      "default": "en",
+      "description": "|ISO 639-1| code selecting which chapters to download."
+    },
+    {
+      "path": "extractor.mangareader.manga.lang",
+      "type": "text",
+      "default": "en",
+      "description": "|ISO 639-1| code selecting which chapters to download."
+    },
+    {
+      "path": "extractor.mangapark.source",
+      "type": "text",
+      "default": null,
+      "description": "Select chapter source and language for a manga. | The general syntax is \"<source name>:<ISO 639-1 language code>\". | Both are optional, meaning \"koala\", \"koala:\", \":en\", or even ju"
+    },
+    {
+      "path": "extractor.[mastodon].access-token",
+      "type": "text",
+      "default": null,
+      "description": "The access-token value you get from linking your account to gallery-dl."
+    },
+    {
+      "path": "extractor.[mastodon].cards",
+      "type": "boolean",
+      "default": false,
+      "description": "Fetch media from cards."
+    },
+    {
+      "path": "extractor.[mastodon].reblogs",
+      "type": "boolean",
+      "default": false,
+      "description": "Fetch media from reblogged posts."
+    },
+    {
+      "path": "extractor.[mastodon].replies",
+      "type": "boolean",
+      "default": true,
+      "description": "Fetch media from replies to other posts."
+    },
+    {
+      "path": "extractor.[mastodon].text-posts",
+      "type": "boolean",
+      "default": false,
+      "description": "Also emit metadata for text-only posts without media content."
+    },
+    {
+      "path": "extractor.[misskey].access-token",
+      "type": "text",
+      "default": null,
+      "description": "Your access token, necessary to fetch favorited notes."
+    },
+    {
+      "path": "extractor.[misskey].date-min",
+      "type": "text",
+      "default": null,
+      "description": "Retrieve only notes posted after/before this |Date|_"
+    },
+    {
+      "path": "extractor.[misskey].date-max",
+      "type": "text",
+      "default": null,
+      "description": "Retrieve only notes posted after/before this |Date|_"
+    },
+    {
+      "path": "extractor.[misskey].include",
+      "type": "json",
+      "default": "notes",
+      "description": "A (comma-separated) list of subcategories to include when processing a user profile."
+    },
+    {
+      "path": "extractor.[misskey].order-posts",
+      "type": "text",
+      "default": "desc",
+      "description": "Controls the order in which posts are processed. \"asc\" | \"reverse\" Ascending order (oldest first) \"desc\" Descending order (newest first)"
+    },
+    {
+      "path": "extractor.[misskey].renotes",
+      "type": "boolean",
+      "default": false,
+      "description": "Fetch media from renoted notes."
+    },
+    {
+      "path": "extractor.[misskey].replies",
+      "type": "boolean",
+      "default": true,
+      "description": "Fetch media from replies to other notes."
+    },
+    {
+      "path": "extractor.[misskey].text-posts",
+      "type": "boolean",
+      "default": false,
+      "description": "Also retrieve text-only notes without media content."
+    },
+    {
+      "path": "extractor.[moebooru].pool.metadata",
+      "type": "boolean",
+      "default": false,
+      "description": "Extract extended pool metadata."
+    },
+    {
+      "path": "extractor.naver-blog.videos",
+      "type": "boolean",
+      "default": true,
+      "description": "Download videos."
+    },
+    {
+      "path": "extractor.naver-chzzk.offset",
+      "type": "integer",
+      "default": 0,
+      "description": "Custom offset starting value when paginating over comments."
+    },
+    {
+      "path": "extractor.newgrounds.flash",
+      "type": "boolean",
+      "default": true,
+      "description": "Download original Adobe Flash animations instead of pre-rendered videos."
+    },
+    {
+      "path": "extractor.newgrounds.format",
+      "type": "json",
+      "default": "original",
+      "description": "Selects the preferred format for video downloads. If the selected format is not available, the next smaller one gets chosen. If this is a list, try each given filename extension in"
+    },
+    {
+      "path": "extractor.newgrounds.include",
+      "type": "json",
+      "default": "art",
+      "description": "A (comma-separated) list of subcategories to include when processing a user profile."
+    },
+    {
+      "path": "extractor.nijie.include",
+      "type": "json",
+      "default": "illustration,doujin",
+      "description": "A (comma-separated) list of subcategories to include when processing a user profile."
+    },
+    {
+      "path": "extractor.[nitter].quoted",
+      "type": "boolean",
+      "default": false,
+      "description": "Fetch media from quoted Tweets."
+    },
+    {
+      "path": "extractor.[nitter].retweets",
+      "type": "boolean",
+      "default": false,
+      "description": "Fetch media from Retweets."
+    },
+    {
+      "path": "extractor.[nitter].videos",
+      "type": "text",
+      "default": true,
+      "description": "Control video download behavior. true Download videos \"ytdl\" Download videos using |ytdl| false Skip video Tweets"
+    },
+    {
+      "path": "extractor.oauth.browser",
+      "type": "boolean",
+      "default": true,
+      "description": "Controls how a user is directed to an OAuth authorization page. true Use Python's |webbrowser.open()|_ method to automatically open the URL in the user's default browser. false Ask"
+    },
+    {
+      "path": "extractor.oauth.cache",
+      "type": "boolean",
+      "default": true,
+      "description": "Store tokens received during OAuth authorizations in cache."
+    },
+    {
+      "path": "extractor.oauth.host",
+      "type": "text",
+      "default": "localhost",
+      "description": "Host name / IP address to bind to during OAuth authorization."
+    },
+    {
+      "path": "extractor.oauth.port",
+      "type": "integer",
+      "default": 6414,
+      "description": "Port number to listen on during OAuth authorization."
+    },
+    {
+      "path": "extractor.paheal.metadata",
+      "type": "boolean",
+      "default": false,
+      "description": "Extract additional metadata (source, uploader)"
+    },
+    {
+      "path": "extractor.patreon.cursor",
+      "type": "text",
+      "default": true,
+      "description": "Controls from which position to start the extraction process from. true | Start from the beginning. | Log the most recent cursor value when interrupted before reaching the end. fal"
+    },
+    {
+      "path": "extractor.patreon.files",
+      "type": "json",
+      "default": [
+        "images",
+        "image_large",
+        "attachments",
+        "postfile",
+        "content"
+      ],
+      "description": "Determines types and order of files to download. Available Types postfile images image_large attachments content"
+    },
+    {
+      "path": "extractor.patreon.format-images",
+      "type": "text",
+      "default": "download_url",
+      "description": "Selects the format of images files. Available Formats download_url (\"a\":1,\"p\":1) url (\"w\":620) original (\"q\":100,\"webp\":0) default (\"w\":620) default_small (\"w\":360) default_blurred"
+    },
+    {
+      "path": "extractor.patreon.order-posts",
+      "type": "text",
+      "default": null,
+      "description": "Controls the order in which posts are returned and processed. \"asc\" Ascending order (oldest first) \"desc\" Descending order (newest first) \"reverse\" Reverse order any other string C"
+    },
+    {
+      "path": "extractor.patreon.user.date-max",
+      "type": "text",
+      "default": 0,
+      "description": "Sets the |Date|_ to start from."
+    },
+    {
+      "path": "extractor.[philomena].api-key",
+      "type": "text",
+      "default": null,
+      "description": "Your account's API Key, to use your personal browsing settings and filters."
+    },
+    {
+      "path": "extractor.[philomena].filter",
+      "type": "integer",
+      "default": null,
+      "description": "The content filter ID to use. Setting an explicit filter ID overrides any default filters and can be used to access 18+ content without API Key. See Filters for details."
+    },
+    {
+      "path": "extractor.[philomena].svg",
+      "type": "boolean",
+      "default": true,
+      "description": "Download SVG versions of images when available. Try to download the view_url version of these posts when this option is disabled."
+    },
+    {
+      "path": "extractor.pillowfort.external",
+      "type": "boolean",
+      "default": false,
+      "description": "Follow links to external sites, e.g. Twitter,"
+    },
+    {
+      "path": "extractor.pillowfort.inline",
+      "type": "boolean",
+      "default": true,
+      "description": "Extract inline images."
+    },
+    {
+      "path": "extractor.pillowfort.reblogs",
+      "type": "boolean",
+      "default": false,
+      "description": "Extract media from reblogged posts."
+    },
+    {
+      "path": "extractor.pinterest.domain",
+      "type": "text",
+      "default": "auto",
+      "description": "Specifies the domain used by pinterest extractors. Setting this option to \"auto\" uses the same domain as a given input URL."
+    },
+    {
+      "path": "extractor.pinterest.sections",
+      "type": "boolean",
+      "default": true,
+      "description": "Include pins from board sections."
+    },
+    {
+      "path": "extractor.pinterest.stories",
+      "type": "boolean",
+      "default": true,
+      "description": "Extract files from story pins."
+    },
+    {
+      "path": "extractor.pinterest.videos",
+      "type": "boolean",
+      "default": true,
+      "description": "Download from video pins."
+    },
+    {
+      "path": "extractor.pixeldrain.api-key",
+      "type": "text",
+      "default": null,
+      "description": "Your account's API key"
+    },
+    {
+      "path": "extractor.pixeldrain.recursive",
+      "type": "boolean",
+      "default": true,
+      "description": "Recursively download files from subfolders."
+    },
+    {
+      "path": "extractor.pixeldrain.zip",
+      "type": "boolean",
+      "default": false,
+      "description": "Download albums as a single `.zip` file."
+    },
+    {
+      "path": "extractor.pixiv.include",
+      "type": "json",
+      "default": "artworks",
+      "description": "A (comma-separated) list of subcategories to include when processing a user profile."
+    },
+    {
+      "path": "extractor.pixiv.refresh-token",
+      "type": "text",
+      "default": null,
+      "description": "The refresh-token value you get from running gallery-dl oauth:pixiv (see OAuth_) or by using a third-party tool like gppt."
+    },
+    {
+      "path": "extractor.pixiv.metadata",
+      "type": "boolean",
+      "default": false,
+      "description": "Fetch extended user metadata."
+    },
+    {
+      "path": "extractor.pixiv.metadata-bookmark",
+      "type": "boolean",
+      "default": false,
+      "description": "For works bookmarked by your own account, fetch bookmark tags as tags_bookmark metadata."
+    },
+    {
+      "path": "extractor.pixiv.captions",
+      "type": "boolean",
+      "default": false,
+      "description": "For works with seemingly empty caption metadata, try to grab the actual caption value using the AJAX API."
+    },
+    {
+      "path": "extractor.pixiv.comments",
+      "type": "boolean",
+      "default": false,
+      "description": "Fetch comments metadata."
+    },
+    {
+      "path": "extractor.pixiv.work.related",
+      "type": "boolean",
+      "default": false,
+      "description": "Also download related artworks."
+    },
+    {
+      "path": "extractor.pixiv.tags",
+      "type": "text",
+      "default": "japanese",
+      "description": "Controls the tags metadata field. `\"japanese\"`: List of Japanese tags `\"translated\"`: List of translated tags `\"original\"`: Unmodified list with both Japanese and translated tags"
+    },
+    {
+      "path": "extractor.pixiv.ugoira",
+      "type": "text",
+      "default": true,
+      "description": "Download Pixiv's Ugoira animations. These animations come as a .zip archive containing all animation frames in JPEG format by default. Set this option to \"original\" to download the"
+    },
+    {
+      "path": "extractor.pixiv.max-posts",
+      "type": "integer",
+      "default": 0,
+      "description": "When downloading galleries, this sets the maximum number of posts to get. A value of 0 means no limit."
+    },
+    {
+      "path": "extractor.pixiv.sanity",
+      "type": "boolean",
+      "default": true,
+      "description": "Try to fetch limit_sanity_level works via web API."
+    },
+    {
+      "path": "extractor.pixiv.favorite.cursor",
+      "type": "text",
+      "default": null,
+      "description": "Start from the given bookmark ID."
+    },
+    {
+      "path": "extractor.pixiv-novel.comments",
+      "type": "boolean",
+      "default": false,
+      "description": "Fetch comments metadata."
+    },
+    {
+      "path": "extractor.pixiv-novel.covers",
+      "type": "boolean",
+      "default": false,
+      "description": "Download cover images."
+    },
+    {
+      "path": "extractor.pixiv-novel.embeds",
+      "type": "boolean",
+      "default": false,
+      "description": "Download embedded images."
+    },
+    {
+      "path": "extractor.pixiv-novel.full-series",
+      "type": "boolean",
+      "default": false,
+      "description": "When downloading a novel being part of a series, download all novels of that series."
+    },
+    {
+      "path": "extractor.pixiv-novel.max-posts",
+      "type": "integer",
+      "default": 0,
+      "description": "When downloading multiple novels, this sets the maximum number of novels to get. A value of 0 means no limit."
+    },
+    {
+      "path": "extractor.pixiv-novel.metadata",
+      "type": "boolean",
+      "default": false,
+      "description": "Fetch extended user metadata."
+    },
+    {
+      "path": "extractor.pixiv-novel.metadata-bookmark",
+      "type": "boolean",
+      "default": false,
+      "description": "For novels bookmarked by your own account, fetch bookmark tags as tags_bookmark metadata."
+    },
+    {
+      "path": "extractor.pixiv-novel.refresh-token",
+      "type": "text",
+      "default": null,
+      "description": "The refresh-token value you get from running gallery-dl oauth:pixiv (see OAuth_) or by using a third-party tool like gppt. This can be the same value as `extractor.pixiv.refresh-to"
+    },
+    {
+      "path": "extractor.pixiv-novel.tags",
+      "type": "text",
+      "default": "japanese",
+      "description": "Controls the tags metadata field. `\"japanese\"`: List of Japanese tags `\"translated\"`: List of translated tags `\"original\"`: Unmodified list with both Japanese and translated tags"
+    },
+    {
+      "path": "extractor.pixiv-novel.bookmark.cursor",
+      "type": "text",
+      "default": null,
+      "description": "Start from the given bookmark ID."
+    },
+    {
+      "path": "extractor.plurk.comments",
+      "type": "boolean",
+      "default": false,
+      "description": "Also search Plurk comments for URLs."
+    },
+    {
+      "path": "extractor.[postmill].save-link-post-body",
+      "type": "boolean",
+      "default": false,
+      "description": "Whether or not to save the body for link/image posts."
+    },
+    {
+      "path": "extractor.reactor.gif",
+      "type": "boolean",
+      "default": false,
+      "description": "Format in which to download animated images. Use true to download animated images as gifs and false to download as mp4 videos."
+    },
+    {
+      "path": "extractor.readcomiconline.captcha",
+      "type": "text",
+      "default": "stop",
+      "description": "Controls how to handle redirects to CAPTCHA pages. \"stop Stop the current extractor run. \"wait Ask the user to solve the CAPTCHA and wait."
+    },
+    {
+      "path": "extractor.readcomiconline.quality",
+      "type": "text",
+      "default": "auto",
+      "description": "Sets the quality query parameter of issue pages. (\"lq\" or \"hq\") \"auto\" uses the quality parameter of the input URL or \"hq\" if not present."
+    },
+    {
+      "path": "extractor.reddit.api",
+      "type": "text",
+      "default": "rest",
+      "description": "Selects which API endpoints to use. \"oauth\" Use the OAuth API at https://oauth.reddit.com Requires client-id & user-agent and uses a refresh token for authentication. \"rest\" Use th"
+    },
+    {
+      "path": "extractor.reddit.comments",
+      "type": "integer",
+      "default": 0,
+      "description": "The value of the limit parameter when loading a submission and its comments. This number (roughly) specifies the total amount of comments being retrieved with the first API call. R"
+    },
+    {
+      "path": "extractor.reddit.morecomments",
+      "type": "boolean",
+      "default": false,
+      "description": "Retrieve additional comments by resolving the more comment stubs in the base comment tree."
+    },
+    {
+      "path": "extractor.reddit.embeds",
+      "type": "boolean",
+      "default": true,
+      "description": "Download embedded comments media."
+    },
+    {
+      "path": "extractor.reddit.date-min",
+      "type": "text",
+      "default": null,
+      "description": "Ignore all submissions posted before/after this date."
+    },
+    {
+      "path": "extractor.reddit.date-max",
+      "type": "text",
+      "default": null,
+      "description": "Ignore all submissions posted before/after this date."
+    },
+    {
+      "path": "extractor.reddit.id-min",
+      "type": "text",
+      "default": null,
+      "description": "Ignore all submissions posted before/after the submission with this ID."
+    },
+    {
+      "path": "extractor.reddit.id-max",
+      "type": "text",
+      "default": null,
+      "description": "Ignore all submissions posted before/after the submission with this ID."
+    },
+    {
+      "path": "extractor.reddit.limit",
+      "type": "integer",
+      "default": null,
+      "description": "Number of results to return in a single API query. This value specifies the limit parameter used for API requests when retrieving paginated results. null means not including this p"
+    },
+    {
+      "path": "extractor.reddit.previews",
+      "type": "boolean",
+      "default": true,
+      "description": "For failed downloads from external URLs / child extractors, download Reddit's preview image/video if available."
+    },
+    {
+      "path": "extractor.reddit.recursion",
+      "type": "integer",
+      "default": 0,
+      "description": "Reddit extractors can recursively visit other submissions linked to in the initial set of submissions. This value sets the maximum recursion depth."
+    },
+    {
+      "path": "extractor.reddit.refresh-token",
+      "type": "text",
+      "default": null,
+      "description": "The refresh-token value you get from linking your Reddit account to gallery-dl. Using a refresh-token allows you to access private or otherwise not publicly available subreddits, g"
+    },
+    {
+      "path": "extractor.reddit.selftext",
+      "type": "boolean",
+      "default": null,
+      "description": "Follow links in the original post's selftext."
+    },
+    {
+      "path": "extractor.reddit.videos",
+      "type": "text",
+      "default": "dash",
+      "description": "Control video download behavior. true Download videos and use |ytdl| to handle HLS and DASH manifests \"ytdl\" Download videos and let |ytdl| handle all of video extraction and downl"
+    },
+    {
+      "path": "extractor.reddit.user.only",
+      "type": "boolean",
+      "default": null,
+      "description": "Only process and return posts from the user specified in the input URL."
+    },
+    {
+      "path": "extractor.redgifs.format",
+      "type": "json",
+      "default": [
+        "hd",
+        "sd",
+        "gif"
+      ],
+      "description": "List of names of the preferred animation format.` If a selected format is not available, the next one in the list will be tried until an available format is found. If the format is"
+    },
+    {
+      "path": "extractor.rule34.api-key",
+      "type": "text",
+      "default": null,
+      "description": "Values from the `API Access Credentials` section found near the bottom of your account's Options page. Enable `Generate New Key?` and click `Save` if the value after &api_key= is e"
+    },
+    {
+      "path": "extractor.rule34.user-id",
+      "type": "text",
+      "default": null,
+      "description": "Values from the `API Access Credentials` section found near the bottom of your account's Options page. Enable `Generate New Key?` and click `Save` if the value after &api_key= is e"
+    },
+    {
+      "path": "extractor.rule34xyz.format",
+      "type": "json",
+      "default": [
+        "10",
+        "40",
+        "41",
+        "2"
+      ],
+      "description": "Selects the file format to extract. When more than one format is given, the first available one is selected."
+    },
+    {
+      "path": "extractor.sankaku.refresh",
+      "type": "boolean",
+      "default": false,
+      "description": "Refresh download URLs before they expire."
+    },
+    {
+      "path": "extractor.sankaku.tags",
+      "type": "text",
+      "default": false,
+      "description": "| Group tags by type and provide them as tags_<type> and tag_string_TYPE metadata fields, | for example tags_artist and tags_character. true Enable general tags categories Requires"
+    },
+    {
+      "path": "extractor.sankakucomplex.embeds",
+      "type": "boolean",
+      "default": false,
+      "description": "Download video embeds from external sites."
+    },
+    {
+      "path": "extractor.sankakucomplex.videos",
+      "type": "boolean",
+      "default": true,
+      "description": "Download videos."
+    },
+    {
+      "path": "extractor.sexcom.gifs",
+      "type": "boolean",
+      "default": true,
+      "description": "Download animated images as .gif instead of .webp"
+    },
+    {
+      "path": "extractor.sizebooru.metadata",
+      "type": "boolean",
+      "default": false,
+      "description": "Extract additional metadata: approver artist date date_approved favorite source tags uploader views"
+    },
+    {
+      "path": "extractor.skeb.article",
+      "type": "boolean",
+      "default": false,
+      "description": "Download article images."
+    },
+    {
+      "path": "extractor.skeb.include",
+      "type": "json",
+      "default": [
+        "works",
+        "sentrequests"
+      ],
+      "description": "A (comma-separated) list of subcategories to include when processing a user profile."
+    },
+    {
+      "path": "extractor.skeb.sent-requests",
+      "type": "boolean",
+      "default": false,
+      "description": "Download sent requests."
+    },
+    {
+      "path": "extractor.skeb.thumbnails",
+      "type": "boolean",
+      "default": false,
+      "description": "Download thumbnails."
+    },
+    {
+      "path": "extractor.skeb.search.filters",
+      "type": "json",
+      "default": [
+        "genre:art",
+        "genre:voice",
+        "genre:novel",
+        "genre:video",
+        "genre:music",
+        "genre:correction"
+      ],
+      "description": "Filters used during searches."
+    },
+    {
+      "path": "extractor.smugmug.videos",
+      "type": "boolean",
+      "default": true,
+      "description": "Download video files."
+    },
+    {
+      "path": "extractor.steamgriddb.animated",
+      "type": "boolean",
+      "default": true,
+      "description": "Include animated assets when downloading from a list of assets."
+    },
+    {
+      "path": "extractor.steamgriddb.epilepsy",
+      "type": "boolean",
+      "default": true,
+      "description": "Include assets tagged with epilepsy when downloading from a list of assets."
+    },
+    {
+      "path": "extractor.steamgriddb.dimensions",
+      "type": "json",
+      "default": "all",
+      "description": "Only include assets that are in the specified dimensions. all can be used to specify all dimensions. Valid Values Grids 460x215 | 920x430 | 342x482 | 600x900 | 660x930 | 512x512 | "
+    },
+    {
+      "path": "extractor.steamgriddb.file-types",
+      "type": "json",
+      "default": "all",
+      "description": "Only include assets that are in the specified file types. all can be used to specify all file types. Valid Values Grids png | jpeg | jpg | webp Heroes png | jpeg | jpg | webp Logos"
+    },
+    {
+      "path": "extractor.steamgriddb.download-fake-png",
+      "type": "boolean",
+      "default": true,
+      "description": "Download fake PNGs alongside the real file."
+    },
+    {
+      "path": "extractor.steamgriddb.humor",
+      "type": "boolean",
+      "default": true,
+      "description": "Include assets tagged with humor when downloading from a list of assets."
+    },
+    {
+      "path": "extractor.steamgriddb.languages",
+      "type": "json",
+      "default": "all",
+      "description": "Only include assets that are in the specified languages. Valid Values |ISO 639-1| codes"
+    },
+    {
+      "path": "extractor.steamgriddb.nsfw",
+      "type": "boolean",
+      "default": true,
+      "description": "Include assets tagged with adult content when downloading from a list of assets."
+    },
+    {
+      "path": "extractor.steamgriddb.sort",
+      "type": "text",
+      "default": "score_desc",
+      "description": "Set the chosen sorting method when downloading from a list of assets."
+    },
+    {
+      "path": "extractor.steamgriddb.static",
+      "type": "boolean",
+      "default": true,
+      "description": "Include static assets when downloading from a list of assets."
+    },
+    {
+      "path": "extractor.steamgriddb.styles",
+      "type": "json",
+      "default": "all",
+      "description": "Only include assets that are in the specified styles. Valid Values Grids alternate | blurred | no_logo | material | white_logo Heroes alternate | blurred | material Logos official "
+    },
+    {
+      "path": "extractor.steamgriddb.untagged",
+      "type": "boolean",
+      "default": true,
+      "description": "Include untagged assets when downloading from a list of assets."
+    },
+    {
+      "path": "extractor.[szurubooru].username",
+      "type": "text",
+      "default": null,
+      "description": "Username and login token of your account to access private resources. To generate a token, visit /user/USERNAME/list-tokens and click Create Token."
+    },
+    {
+      "path": "extractor.[szurubooru].token",
+      "type": "text",
+      "default": null,
+      "description": "Username and login token of your account to access private resources. To generate a token, visit /user/USERNAME/list-tokens and click Create Token."
+    },
+    {
+      "path": "extractor.tenor.format",
+      "type": "json",
+      "default": [
+        "gif",
+        "mp4",
+        "webm",
+        "webp"
+      ],
+      "description": "List of names of the preferred animation format. If a selected format is not available, the next one in the list will be tried until a format is found. Available Formats gif gif_tr"
+    },
+    {
+      "path": "extractor.tiktok.audio",
+      "type": "text",
+      "default": true,
+      "description": "Controls audio download behavior. true Download audio tracks \"ytdl\" Download audio tracks using |ytdl| false Ignore audio tracks"
+    },
+    {
+      "path": "extractor.tiktok.covers",
+      "type": "text",
+      "default": false,
+      "description": "Download video covers. true Download the first cover found in the following order: thumbnail cover originCover dynamicCover false Do not download covers \"all\" Download all availabl"
+    },
+    {
+      "path": "extractor.tiktok.photos",
+      "type": "boolean",
+      "default": true,
+      "description": "Download photos."
+    },
+    {
+      "path": "extractor.tiktok.subtitles",
+      "type": "text",
+      "default": false,
+      "description": "Download video subtitles. The subtitles can be filtered by source or language. The following source types can be filtered: ASR - Automatic Speech Recognition MT - Machine Translati"
+    },
+    {
+      "path": "extractor.tiktok.videos",
+      "type": "boolean",
+      "default": true,
+      "description": "Download videos using |ytdl|."
+    },
+    {
+      "path": "extractor.tiktok.tiktok-range",
+      "type": "text",
+      "default": "",
+      "description": "Range or playlist indices of tiktok posts to extract. When using `ytdl`, see ytdl/playlist_items for details."
+    },
+    {
+      "path": "extractor.tiktok.posts.order-posts",
+      "type": "text",
+      "default": "desc",
+      "description": "Controls the order in which posts are processed. \"asc\" | \"reverse\" Ascending order (oldest first) \"desc\" Descending order (newest first) \"popular\" Popular order"
+    },
+    {
+      "path": "extractor.tiktok.posts.ytdl",
+      "type": "boolean",
+      "default": false,
+      "description": "Extract user posts with |ytdl|"
+    },
+    {
+      "path": "extractor.tiktok.posts.module",
+      "type": "text",
+      "default": null,
+      "description": "The |ytdl| |Module|_ to extract posts from a tiktok user profile with. See `extractor.ytdl.module`_."
+    },
+    {
+      "path": "extractor.tiktok.user.include",
+      "type": "json",
+      "default": [
+        "avatar",
+        "posts"
+      ],
+      "description": "A (comma-separated) list of subcategories to include when processing a user profile."
+    },
+    {
+      "path": "extractor.tumblr.avatar",
+      "type": "boolean",
+      "default": false,
+      "description": "Download blog avatars."
+    },
+    {
+      "path": "extractor.tumblr.date-min",
+      "type": "text",
+      "default": null,
+      "description": "Ignore all posts published before/after this date."
+    },
+    {
+      "path": "extractor.tumblr.date-max",
+      "type": "text",
+      "default": null,
+      "description": "Ignore all posts published before/after this date."
+    },
+    {
+      "path": "extractor.tumblr.external",
+      "type": "boolean",
+      "default": false,
+      "description": "Follow external URLs (e.g. from \"Link\" posts) and try to extract images from them."
+    },
+    {
+      "path": "extractor.tumblr.inline",
+      "type": "boolean",
+      "default": true,
+      "description": "Search posts for inline images and videos."
+    },
+    {
+      "path": "extractor.tumblr.offset",
+      "type": "integer",
+      "default": 0,
+      "description": "Custom offset starting value when paginating over blog posts. Allows skipping over posts without having to waste API calls."
+    },
+    {
+      "path": "extractor.tumblr.original",
+      "type": "boolean",
+      "default": true,
+      "description": "Download full-resolution photo and inline images. For each photo with \"maximum\" resolution (width equal to 2048 or height equal to 3072) or each inline image, use an extra HTTP req"
+    },
+    {
+      "path": "extractor.tumblr.pagination",
+      "type": "text",
+      "default": null,
+      "description": "Controls how to paginate over blog posts. \"api\" next parameter provided by the API (potentially misses posts due to a bug in Tumblr's API) \"before\" Timestamp of last post \"offset\" "
+    },
+    {
+      "path": "extractor.tumblr.ratelimit",
+      "type": "text",
+      "default": "abort",
+      "description": "Selects how to handle exceeding the daily API rate limit. \"abort\" Raise an error and stop extraction \"wait\" Wait until rate limit reset"
+    },
+    {
+      "path": "extractor.tumblr.reblogs",
+      "type": "text",
+      "default": true,
+      "description": "true Extract media from reblogged posts false Skip reblogged posts \"same-blog\" Skip reblogged posts unless the original post is from the same blog"
+    },
+    {
+      "path": "extractor.tumblr.posts",
+      "type": "json",
+      "default": "all",
+      "description": "A (comma-separated) list of post types to extract images, etc. from. Possible types are text, quote, link, answer, video, audio, photo, chat. It is possible to use \"all\" instead of"
+    },
+    {
+      "path": "extractor.tumblr.fallback-delay",
+      "type": "text",
+      "default": 120.0,
+      "description": "Number of seconds to wait between retries for fetching full-resolution images."
+    },
+    {
+      "path": "extractor.tumblr.fallback-retries",
+      "type": "integer",
+      "default": 2,
+      "description": "Number of retries for fetching full-resolution images or -1 for infinite retries."
+    },
+    {
+      "path": "extractor.twibooru.api-key",
+      "type": "text",
+      "default": null,
+      "description": "Your Twibooru API Key, to use your account's browsing settings and filters."
+    },
+    {
+      "path": "extractor.twibooru.filter",
+      "type": "integer",
+      "default": null,
+      "description": "The content filter ID to use. Setting an explicit filter ID overrides any default filters and can be used to access 18+ content without API Key. See Filters for details."
+    },
+    {
+      "path": "extractor.twibooru.svg",
+      "type": "boolean",
+      "default": true,
+      "description": "Download SVG versions of images when available. Try to download the view_url version of these posts when this option is disabled."
+    },
+    {
+      "path": "extractor.twitter.ads",
+      "type": "boolean",
+      "default": false,
+      "description": "Fetch media from promoted Tweets."
+    },
+    {
+      "path": "extractor.twitter.articles",
+      "type": "json",
+      "default": true,
+      "description": "Process `article` Tweets. It is possible to select which files to download and what article metadata to extract by specifying a list of targets: cover Download article cover images"
+    },
+    {
+      "path": "extractor.twitter.cards",
+      "type": "text",
+      "default": false,
+      "description": "Controls how to handle Twitter Cards. false Ignore cards true Download image content from supported cards \"ytdl\" Additionally download video content from unsupported cards using |y"
+    },
+    {
+      "path": "extractor.twitter.cards-blacklist",
+      "type": "json",
+      "default": null,
+      "description": "List of card types to ignore. Possible values are card names card domains <card name>:<card domain>"
+    },
+    {
+      "path": "extractor.twitter.conversations",
+      "type": "text",
+      "default": false,
+      "description": "For input URLs pointing to a single Tweet, e.g. `https://twitter.com/i/web/status/<TweetID>`, fetch media from all Tweets and replies in this conversation. If this option is equal "
+    },
+    {
+      "path": "extractor.twitter.csrf",
+      "type": "text",
+      "default": "cookies",
+      "description": "Controls how to handle Cross Site Request Forgery (CSRF) tokens. \"auto\" Always auto-generate a token. \"cookies\" Use token given by the ct0 cookie if present."
+    },
+    {
+      "path": "extractor.twitter.cursor",
+      "type": "text",
+      "default": true,
+      "description": "Controls from which position to start the extraction process from. true | Start from the beginning. | Log the most recent cursor value when interrupted before reaching the end. fal"
+    },
+    {
+      "path": "extractor.twitter.expand",
+      "type": "boolean",
+      "default": false,
+      "description": "For each Tweet, return all Tweets from that initial Tweet's conversation or thread, i.e. expand all Twitter threads. Going through a timeline with this option enabled is essentiall"
+    },
+    {
+      "path": "extractor.twitter.unavailable",
+      "type": "boolean",
+      "default": false,
+      "description": "Try to download media marked as Unavailable, e.g. Geoblocked videos."
+    },
+    {
+      "path": "extractor.twitter.include",
+      "type": "json",
+      "default": "timeline",
+      "description": "A (comma-separated) list of subcategories to include when processing a user profile."
+    },
+    {
+      "path": "extractor.twitter.transform",
+      "type": "boolean",
+      "default": true,
+      "description": "Transform Tweet and User metadata into a simpler, uniform format."
+    },
+    {
+      "path": "extractor.twitter.tweet-endpoint",
+      "type": "text",
+      "default": "auto",
+      "description": "Selects the API endpoint used to retrieve single Tweets. \"restid\" /TweetResultByRestId - accessible to guest users \"detail\" /TweetDetail - more stable \"auto\" \"detail\" when logged i"
+    },
+    {
+      "path": "extractor.twitter.size",
+      "type": "json",
+      "default": [
+        "orig",
+        "4096x4096",
+        "large",
+        "medium",
+        "small"
+      ],
+      "description": "The image version to download. Any entries after the first one will be used for potential fallback URLs. Known available sizes are orig large medium small 4096x4096 900x900 360x360"
+    },
+    {
+      "path": "extractor.twitter.limit",
+      "type": "integer",
+      "default": 50,
+      "description": "Number of requested results per API query. When given as a list, start with the first element as count parameter and switch to the next element whenever no results are returned."
+    },
+    {
+      "path": "extractor.twitter.logout",
+      "type": "boolean",
+      "default": false,
+      "description": "Logout and retry as guest when access to another user's Tweets is blocked."
+    },
+    {
+      "path": "extractor.twitter.metadata-user",
+      "type": "boolean",
+      "default": false,
+      "description": "Extract additional metadata for user accounts (author, user) based_in friends_mutual location_accurate name_changes source"
+    },
+    {
+      "path": "extractor.twitter.pinned",
+      "type": "boolean",
+      "default": false,
+      "description": "Fetch media from pinned Tweets."
+    },
+    {
+      "path": "extractor.twitter.previews",
+      "type": "boolean",
+      "default": false,
+      "description": "Download video previews."
+    },
+    {
+      "path": "extractor.twitter.quoted",
+      "type": "boolean",
+      "default": false,
+      "description": "Fetch media from quoted Tweets. If this option is enabled, gallery-dl will try to fetch a quoted (original) Tweet when it sees the Tweet which quotes it."
+    },
+    {
+      "path": "extractor.twitter.ratelimit",
+      "type": "text",
+      "default": "wait",
+      "description": "Selects how to handle exceeding the API rate limit. \"abort\" Raise an error and stop extraction \"abort:N\" Raise an error and stop extraction after waiting N times until rate limit r"
+    },
+    {
+      "path": "extractor.twitter.locked",
+      "type": "text",
+      "default": "abort",
+      "description": "Selects how to handle \"account is temporarily locked\" errors. \"abort\" Raise an error and stop extraction \"wait\" Wait until the account is unlocked and retry"
+    },
+    {
+      "path": "extractor.twitter.replies",
+      "type": "boolean",
+      "default": true,
+      "description": "Fetch media from replies to other Tweets. If this value is \"self\", only consider replies where reply and original Tweet are from the same user."
+    },
+    {
+      "path": "extractor.twitter.retries-api",
+      "type": "integer",
+      "default": 9,
+      "description": "Maximum number of retries for API requests when encountering server errors, or -1 for infinite retries."
+    },
+    {
+      "path": "extractor.twitter.retweets",
+      "type": "boolean",
+      "default": false,
+      "description": "Fetch media from Retweets. If this value is \"original\", metadata for these files will be taken from the original Tweets, not the Retweets."
+    },
+    {
+      "path": "extractor.twitter.search-limit",
+      "type": "integer",
+      "default": 20,
+      "description": "Number of requested results per search query. When given as a list, start with the first element as count parameter and switch to the next element when search-stop is reached."
+    },
+    {
+      "path": "extractor.twitter.search-pagination",
+      "type": "text",
+      "default": "max_id",
+      "description": "Selects how to paginate over search results. \"cursor\" Use cursor values provided by the API \"max_id\" | \"maxid\" | \"id\" Update the max_id search query parameter to the Tweet ID value"
+    },
+    {
+      "path": "extractor.twitter.search-results",
+      "type": "text",
+      "default": "latest",
+      "description": "Determines the target of search results."
+    },
+    {
+      "path": "extractor.twitter.search-stop",
+      "type": "integer",
+      "default": 3,
+      "description": "Number of empty search result batches to accept before stopping."
+    },
+    {
+      "path": "extractor.twitter.timeline.strategy",
+      "type": "text",
+      "default": "auto",
+      "description": "Controls the strategy / tweet source used for timeline URLs (https://twitter.com/USER/timeline). \"tweets\" /tweets timeline + search \"media\" /media timeline + search \"with_replies\" "
+    },
+    {
+      "path": "extractor.twitter.text-tweets",
+      "type": "boolean",
+      "default": false,
+      "description": "Also emit metadata for text-only Tweets without media content. This only has an effect with a metadata (or exec) post processor with \"event\": \"post\" and appropriate filename."
+    },
+    {
+      "path": "extractor.twitter.twitpic",
+      "type": "boolean",
+      "default": false,
+      "description": "Extract TwitPic embeds."
+    },
+    {
+      "path": "extractor.twitter.unique",
+      "type": "boolean",
+      "default": true,
+      "description": "Ignore previously seen Tweets."
+    },
+    {
+      "path": "extractor.twitter.users",
+      "type": "text",
+      "default": "user",
+      "description": "| Basic format string for user URLs generated from following and list-members queries, | whose replacement field values come from Twitter user objects (Example)"
+    },
+    {
+      "path": "extractor.twitter.videos",
+      "type": "text",
+      "default": true,
+      "description": "Control video download behavior. true Download videos \"ytdl\" Download videos using |ytdl| false Skip video Tweets"
+    },
+    {
+      "path": "extractor.unsplash.format",
+      "type": "text",
+      "default": "raw",
+      "description": "Name of the image format to download. Available Formats \"raw\" \"full\" \"regular\" \"small\" \"thumb\""
+    },
+    {
+      "path": "extractor.vipergirls.domain",
+      "type": "text",
+      "default": "viper.click",
+      "description": "Specifies the domain used by vipergirls extractors. For example \"viper.click\" if the main domain is blocked or to bypass Cloudflare,"
+    },
+    {
+      "path": "extractor.vipergirls.like",
+      "type": "boolean",
+      "default": false,
+      "description": "Automatically `like` posts after downloading their images."
+    },
+    {
+      "path": "extractor.vipergirls.order-posts",
+      "type": "text",
+      "default": "desc",
+      "description": "Controls the order in which posts of a thread are processed. \"asc\" Ascending order (oldest first) \"desc\" | \"reverse\" Descending order (newest first)"
+    },
+    {
+      "path": "extractor.vk.offset",
+      "type": "integer",
+      "default": 0,
+      "description": "Custom offset starting value when paginating over image results."
+    },
+    {
+      "path": "extractor.vsco.include",
+      "type": "json",
+      "default": "gallery",
+      "description": "A (comma-separated) list of subcategories to include when processing a user profile."
+    },
+    {
+      "path": "extractor.vsco.videos",
+      "type": "boolean",
+      "default": true,
+      "description": "Download video files."
+    },
+    {
+      "path": "extractor.wallhaven.api-key",
+      "type": "text",
+      "default": null,
+      "description": "Your Wallhaven API Key, to use your account's browsing settings and default filters when searching. See https://wallhaven.cc/help/api for more information."
+    },
+    {
+      "path": "extractor.wallhaven.include",
+      "type": "json",
+      "default": "uploads",
+      "description": "A (comma-separated) list of subcategories to include when processing a user profile."
+    },
+    {
+      "path": "extractor.wallhaven.metadata",
+      "type": "boolean",
+      "default": false,
+      "description": "Extract additional metadata (tags, uploader)"
+    },
+    {
+      "path": "extractor.weasyl.api-key",
+      "type": "text",
+      "default": null,
+      "description": "Your Weasyl API Key, to use your account's browsing settings and filters."
+    },
+    {
+      "path": "extractor.weasyl.metadata",
+      "type": "boolean",
+      "default": false,
+      "description": "| Fetch extra submission metadata during gallery downloads. | (comments, description, favorites, folder_name, tags, views)"
+    },
+    {
+      "path": "extractor.webtoons.bgm",
+      "type": "text",
+      "default": true,
+      "description": "Download an episode's `background music` if available. If this is a string, remux the downloaded `background music` file into the given format."
+    },
+    {
+      "path": "extractor.webtoons.quality",
+      "type": "json",
+      "default": "original",
+      "description": "Controls the quality of downloaded files by modifying URLs' type parameter. \"original\" Download minimally compressed versions of JPG files any integer Use \"q<VALUE>\" as type parame"
+    },
+    {
+      "path": "extractor.webtoons.banners",
+      "type": "boolean",
+      "default": false,
+      "description": "Download the active comic's banner."
+    },
+    {
+      "path": "extractor.webtoons.thumbnails",
+      "type": "boolean",
+      "default": false,
+      "description": "Download the active episode's thumbnail. Useful for creating CBZ archives with actual source thumbnails."
+    },
+    {
+      "path": "extractor.weebdex.data-saver",
+      "type": "boolean",
+      "default": false,
+      "description": "Enable `Data Saver` mode and download lower quality versions of chapters."
+    },
+    {
+      "path": "extractor.weebdex.manga.lang",
+      "type": "text",
+      "default": "en",
+      "description": "|ISO 639-1| code selecting which chapters to download."
+    },
+    {
+      "path": "extractor.weibo.gifs",
+      "type": "text",
+      "default": true,
+      "description": "Download gif files. Set this to \"video\" to download GIFs as video files."
+    },
+    {
+      "path": "extractor.weibo.include",
+      "type": "json",
+      "default": "feed",
+      "description": "A (comma-separated) list of subcategories to include when processing a user profile."
+    },
+    {
+      "path": "extractor.weibo.livephoto",
+      "type": "boolean",
+      "default": true,
+      "description": "Download livephoto files."
+    },
+    {
+      "path": "extractor.weibo.movies",
+      "type": "boolean",
+      "default": false,
+      "description": "Download movie videos."
+    },
+    {
+      "path": "extractor.weibo.retweets",
+      "type": "boolean",
+      "default": false,
+      "description": "Fetch media from retweeted posts. If this value is \"original\", metadata for these files will be taken from the original posts, not the retweeted posts."
+    },
+    {
+      "path": "extractor.weibo.text",
+      "type": "boolean",
+      "default": false,
+      "description": "Extract full text & text_raw metadata for statuses with truncated text."
+    },
+    {
+      "path": "extractor.weibo.videos",
+      "type": "boolean",
+      "default": true,
+      "description": "Download video files."
+    },
+    {
+      "path": "extractor.weibo.album.subalbums",
+      "type": "boolean",
+      "default": false,
+      "description": "Extract subalbum media."
+    },
+    {
+      "path": "extractor.wikimedia.format",
+      "type": "text",
+      "default": null,
+      "description": "Sets the `format` query parameter value added to all download URLs."
+    },
+    {
+      "path": "extractor.wikimedia.image-revisions",
+      "type": "integer",
+      "default": 1,
+      "description": "Number of revisions to return for a single image. The dafault value of 1 only returns the latest revision. The value must be between 1 and 500."
+    },
+    {
+      "path": "extractor.wikimedia.limit",
+      "type": "integer",
+      "default": 50,
+      "description": "Number of results to return in a single API query. The value must be between 10 and 500."
+    },
+    {
+      "path": "extractor.wikimedia.subcategories",
+      "type": "boolean",
+      "default": true,
+      "description": "For Category: pages, recursively descent into subcategories."
+    },
+    {
+      "path": "extractor.[xenforo].attachments",
+      "type": "boolean",
+      "default": true,
+      "description": "Extract forum post attachments."
+    },
+    {
+      "path": "extractor.[xenforo].embeds",
+      "type": "boolean",
+      "default": true,
+      "description": "Extract URLs of forum post embeds."
+    },
+    {
+      "path": "extractor.[xenforo].metadata",
+      "type": "boolean",
+      "default": false,
+      "description": "Extract detailed metadata for `media` files."
+    },
+    {
+      "path": "extractor.[xenforo].order-posts",
+      "type": "text",
+      "default": null,
+      "description": "Controls the order in which posts of a thread or `media` files are processed. \"asc\" Ascending order (oldest first) \"desc\" | \"reverse\" Descending order (newest first) \"reaction\" | \""
+    },
+    {
+      "path": "extractor.[xenforo].quoted",
+      "type": "boolean",
+      "default": false,
+      "description": "Extract files from quoted content."
+    },
+    {
+      "path": "extractor.xfolio.fullsize",
+      "type": "boolean",
+      "default": true,
+      "description": "Download posts' files as `Full Size Download` ZIP container if available and purchased."
+    },
+    {
+      "path": "extractor.ytdl.cmdline-args",
+      "type": "json",
+      "default": null,
+      "description": "Additional ytdl options specified as command-line arguments. See yt-dlp options / youtube-dl options"
+    },
+    {
+      "path": "extractor.ytdl.config-file",
+      "type": "text",
+      "default": null,
+      "description": "Location of a |ytdl| configuration file to load options from."
+    },
+    {
+      "path": "extractor.ytdl.deprecations",
+      "type": "boolean",
+      "default": false,
+      "description": "Allow |ytdl| to warn about deprecated options and features."
+    },
+    {
+      "path": "extractor.ytdl.enabled",
+      "type": "boolean",
+      "default": false,
+      "description": "Process URLs otherwise unsupported by gallery-dl with |ytdl|."
+    },
+    {
+      "path": "extractor.ytdl.format",
+      "type": "text",
+      "default": null,
+      "description": "ytdl format selection string. See yt-dlp format selection / youtube-dl format selection"
+    },
+    {
+      "path": "extractor.ytdl.generic",
+      "type": "text",
+      "default": true,
+      "description": "Enables the use of |ytdl's| Generic extractor. Set this option to \"force\" for the same effect as --force-generic-extractor."
+    },
+    {
+      "path": "extractor.ytdl.generic-category",
+      "type": "boolean",
+      "default": true,
+      "description": "When using |ytdl's| Generic extractor, change `category` to \"ytdl-generic\" and set `subcategory` to the input URL's domain."
+    },
+    {
+      "path": "extractor.ytdl.logging",
+      "type": "boolean",
+      "default": true,
+      "description": "Route |ytdl's| output through gallery-dl's logging system. Otherwise it will be written directly to stdout/stderr."
+    },
+    {
+      "path": "extractor.ytdl.module",
+      "type": "text",
+      "default": null,
+      "description": "The ytdl |Module|_ to import. Setting this to null will try to import \"yt_dlp\" followed by \"youtube_dl\" as fallback."
+    },
+    {
+      "path": "extractor.ytdl.raw-options",
+      "type": "json",
+      "default": null,
+      "description": "Additional options passed directly to the YoutubeDL constructor. Available options can be found in yt-dlp's docstrings / youtube-dl's docstrings"
+    },
+    {
+      "path": "extractor.zerochan.extensions",
+      "type": "json",
+      "default": [
+        "jpg",
+        "png",
+        "webp",
+        "gif"
+      ],
+      "description": "List of filename extensions to try when dynamically building download URLs (\"pagination\": \"api\" + \"metadata\": false)"
+    },
+    {
+      "path": "extractor.zerochan.metadata",
+      "type": "boolean",
+      "default": false,
+      "description": "Extract additional metadata (date, md5, tags, ...)"
+    },
+    {
+      "path": "extractor.zerochan.pagination",
+      "type": "text",
+      "default": "api",
+      "description": "Controls how to paginate over tag search results. \"api\" Use the JSON API (no extension metadata) \"html\" Parse HTML pages (limited to 100 pages 24 posts)"
+    },
+    {
+      "path": "extractor.zerochan.redirects",
+      "type": "boolean",
+      "default": false,
+      "description": "Automatically follow tag redirects."
+    },
+    {
+      "path": "extractor.[booru].tags",
+      "type": "boolean",
+      "default": false,
+      "description": "Group tags by type and provide them as tags_<type> metadata fields, for example tags_artist or tags_character."
+    },
+    {
+      "path": "extractor.[booru].notes",
+      "type": "boolean",
+      "default": false,
+      "description": "Extract overlay notes (position and text)."
+    },
+    {
+      "path": "extractor.[booru].url",
+      "type": "json",
+      "default": "file_url",
+      "description": "Alternate field name to retrieve download URLs from. When multiple names are given, download the first available one."
+    },
+    {
+      "path": "extractor.[manga-extractor].chapter-reverse",
+      "type": "boolean",
+      "default": false,
+      "description": "Reverse the order of chapter URLs extracted from manga pages. true Start with the latest chapter false Start with the first chapter"
+    },
+    {
+      "path": "extractor.[manga-extractor].page-reverse",
+      "type": "boolean",
+      "default": false,
+      "description": "Download manga chapter pages in reverse order. Downloader Options =================="
+    },
+    {
+      "path": "downloader.*.enabled",
+      "type": "boolean",
+      "default": true,
+      "description": "Enable/Disable this downloader module."
+    },
+    {
+      "path": "downloader.*.filesize-min",
+      "type": "text",
+      "default": null,
+      "description": "Minimum/Maximum allowed file size in bytes. Any file smaller/larger than this limit will not be downloaded. Possible values are valid integer or floating-point numbers optionally f"
+    },
+    {
+      "path": "downloader.*.filesize-max",
+      "type": "text",
+      "default": null,
+      "description": "Minimum/Maximum allowed file size in bytes. Any file smaller/larger than this limit will not be downloaded. Possible values are valid integer or floating-point numbers optionally f"
+    },
+    {
+      "path": "downloader.*.mtime",
+      "type": "boolean",
+      "default": true,
+      "description": "Use |Last-Modified|_ HTTP response headers to set file modification times."
+    },
+    {
+      "path": "downloader.*.part",
+      "type": "boolean",
+      "default": true,
+      "description": "Controls the use of .part files during file downloads. true Write downloaded data into .part files and rename them upon download completion. This mode additionally supports resumin"
+    },
+    {
+      "path": "downloader.*.part-directory",
+      "type": "json",
+      "default": null,
+      "description": "Alternate location(s) for .part files."
+    },
+    {
+      "path": "downloader.*.progress",
+      "type": "text",
+      "default": 3.0,
+      "description": "Number of seconds until a download progress indicator for the current download is displayed. Set this option to null to disable this indicator."
+    },
+    {
+      "path": "downloader.*.rate",
+      "type": "json",
+      "default": null,
+      "description": "Maximum download rate in bytes per second. Possible values are valid integer or floating-point numbers optionally followed by one of k, m. g, t, or p. These suffixes are case-insen"
+    },
+    {
+      "path": "downloader.*.retries",
+      "type": "integer",
+      "default": null,
+      "description": "Maximum number of retries during file downloads, or -1 for infinite retries."
+    },
+    {
+      "path": "downloader.*.timeout",
+      "type": "text",
+      "default": null,
+      "description": "Connection timeout during file downloads."
+    },
+    {
+      "path": "downloader.*.verify",
+      "type": "text",
+      "default": null,
+      "description": "Certificate validation during file downloads."
+    },
+    {
+      "path": "downloader.*.proxy",
+      "type": "json",
+      "default": null,
+      "description": "Proxy server used for file downloads. Disable the use of a proxy for file downloads by explicitly setting this option to null."
+    },
+    {
+      "path": "downloader.http.adjust-extensions",
+      "type": "boolean",
+      "default": true,
+      "description": "Check file headers of downloaded files and adjust their filename extensions if they do not match. For example, this will change the filename extension ({extension}) of a file calle"
+    },
+    {
+      "path": "downloader.http.consume-content",
+      "type": "boolean",
+      "default": false,
+      "description": "Controls the behavior when an HTTP response is considered unsuccessful If the value is true, consume the response body. This avoids closing the connection and therefore improves co"
+    },
+    {
+      "path": "downloader.http.chunk-size",
+      "type": "text",
+      "default": 32768,
+      "description": "Number of bytes per downloaded chunk. Possible values are integer numbers optionally followed by one of k, m. g, t, or p. These suffixes are case-insensitive."
+    },
+    {
+      "path": "downloader.http.headers",
+      "type": "json",
+      "default": null,
+      "description": "Additional HTTP headers to send when downloading files,"
+    },
+    {
+      "path": "downloader.http.retry-codes",
+      "type": "integer",
+      "default": null,
+      "description": "Additional HTTP response status codes to retry a download on. Codes 200, 206, and 416 (when resuming a partial download) will never be retried and always count as success, regardle"
+    },
+    {
+      "path": "downloader.http.sleep-429",
+      "type": "text",
+      "default": null,
+      "description": "Number of seconds to sleep when receiving a `429 Too Many Requests` response before retrying the request."
+    },
+    {
+      "path": "downloader.http.validate",
+      "type": "boolean",
+      "default": true,
+      "description": "Check for invalid responses. Fail a download when a file does not pass instead of downloading a potentially broken file."
+    },
+    {
+      "path": "downloader.http.validate-html",
+      "type": "boolean",
+      "default": true,
+      "description": "Check for unexpected HTML responses. Fail file downloads with a text/html Content-Type header when expecting a media file instead."
+    },
+    {
+      "path": "downloader.ytdl.cmdline-args",
+      "type": "json",
+      "default": null,
+      "description": "Additional ytdl options specified as command-line arguments. See yt-dlp options / youtube-dl options"
+    },
+    {
+      "path": "downloader.ytdl.config-file",
+      "type": "text",
+      "default": null,
+      "description": "Location of a |ytdl| configuration file to load options from."
+    },
+    {
+      "path": "downloader.ytdl.deprecations",
+      "type": "boolean",
+      "default": false,
+      "description": "Allow |ytdl| to warn about deprecated options and features."
+    },
+    {
+      "path": "downloader.ytdl.format",
+      "type": "text",
+      "default": null,
+      "description": "ytdl format selection string. See yt-dlp format selection / youtube-dl format selection"
+    },
+    {
+      "path": "downloader.ytdl.forward-cookies",
+      "type": "boolean",
+      "default": true,
+      "description": "Forward gallery-dl's cookies to |ytdl|."
+    },
+    {
+      "path": "downloader.ytdl.logging",
+      "type": "boolean",
+      "default": true,
+      "description": "Route |ytdl's| output through gallery-dl's logging system. Otherwise it will be written directly to stdout/stderr."
+    },
+    {
+      "path": "downloader.ytdl.module",
+      "type": "text",
+      "default": null,
+      "description": "The ytdl |Module|_ to import. Setting this to null will try to import \"yt_dlp\" followed by \"youtube_dl\" as fallback."
+    },
+    {
+      "path": "downloader.ytdl.outtmpl",
+      "type": "text",
+      "default": null,
+      "description": "The `Output Template` used to generate filenames for files downloaded with ytdl. See yt-dlp output template / youtube-dl output template."
+    },
+    {
+      "path": "downloader.ytdl.raw-options",
+      "type": "json",
+      "default": null,
+      "description": "Additional options passed directly to the YoutubeDL constructor. Available options can be found in yt-dlp's docstrings / youtube-dl's docstrings Output Options =============="
+    },
+    {
+      "path": "output.mode",
+      "type": "json",
+      "default": "auto",
+      "description": "Controls the output string format and status indicators. \"null\" No output \"pipe\" Suitable for piping to other processes or files \"terminal\" Suitable for the standard Windows consol"
+    },
+    {
+      "path": "output.stdout",
+      "type": "json",
+      "default": null,
+      "description": "Reconfigure a standard stream. Possible options are encoding errors newline line_buffering write_through When this option is specified as a simple string, it is interpreted as {\"en"
+    },
+    {
+      "path": "output.stdin",
+      "type": "json",
+      "default": null,
+      "description": "Reconfigure a standard stream. Possible options are encoding errors newline line_buffering write_through When this option is specified as a simple string, it is interpreted as {\"en"
+    },
+    {
+      "path": "output.stderr",
+      "type": "json",
+      "default": null,
+      "description": "Reconfigure a standard stream. Possible options are encoding errors newline line_buffering write_through When this option is specified as a simple string, it is interpreted as {\"en"
+    },
+    {
+      "path": "output.shorten",
+      "type": "boolean",
+      "default": true,
+      "description": "Controls whether the output strings should be shortened to fit on one console line. Set this option to \"eaw\" to also work with east-asian characters with a display width greater th"
+    },
+    {
+      "path": "output.colors",
+      "type": "boolean",
+      "default": null,
+      "description": "Controls the ANSI colors used for various outputs. true Use default ANSI colors. false Disable ANSI colors. object Use custom ANSI colors. Keys for |mode: color|__ success: success"
+    },
+    {
+      "path": "output.ansi",
+      "type": "boolean",
+      "default": true,
+      "description": "| On Windows, enable ANSI escape sequences and colored output | by setting the ENABLE_VIRTUAL_TERMINAL_PROCESSING flag for stdout and stderr."
+    },
+    {
+      "path": "output.skip",
+      "type": "boolean",
+      "default": true,
+      "description": "Show skipped file downloads."
+    },
+    {
+      "path": "output.fallback",
+      "type": "boolean",
+      "default": true,
+      "description": "Include fallback URLs in the output of -g/--get-urls."
+    },
+    {
+      "path": "output.jsonl",
+      "type": "boolean",
+      "default": false,
+      "description": "Output -j/--dump-json & -J/--resolve-json data in JSON Lines format."
+    },
+    {
+      "path": "output.private",
+      "type": "boolean",
+      "default": false,
+      "description": "Include private fields, i.e. fields whose name starts with an underscore, in the output of -K/--list-keywords and -j/--dump-json."
+    },
+    {
+      "path": "output.progress",
+      "type": "text",
+      "default": true,
+      "description": "Controls the progress indicator when gallery-dl is run with multiple URLs as arguments. true Show the default progress indicator (\"[{current}/{total}] {url}\") false Do not show any"
+    },
+    {
+      "path": "output.log",
+      "type": "text",
+      "default": "[{name}][{levelname}] {message}",
+      "description": "Configuration for logging output to stderr."
+    },
+    {
+      "path": "output.logfile",
+      "type": "text",
+      "default": null,
+      "description": "File to write logging output to."
+    },
+    {
+      "path": "output.unsupportedfile",
+      "type": "text",
+      "default": null,
+      "description": "File to write external URLs unsupported by gallery-dl to."
+    },
+    {
+      "path": "output.errorfile",
+      "type": "text",
+      "default": null,
+      "description": "File to write input URLs which returned an error to. When combined with -I/--input-file-comment or -x/--input-file-delete, this option will cause all input URLs from these files to"
+    },
+    {
+      "path": "output.num-to-str",
+      "type": "boolean",
+      "default": false,
+      "description": "Convert numeric values (integer or float) to string before outputting them as JSON. Postprocessor Options ===================== This section lists all options available inside `Pos"
+    },
+    {
+      "path": "postprocessor.actions.action",
+      "type": "text",
+      "default": null,
+      "description": "The `Action(s)`_ to perform."
+    },
+    {
+      "path": "postprocessor.actions.event",
+      "type": "json",
+      "default": "prepare",
+      "description": "The event(s) for which `actions.action`_ is triggered. See `metadata.event`_ for a list of available events."
+    },
+    {
+      "path": "postprocessor.classify.mapping",
+      "type": "json",
+      "default": null,
+      "description": "A mapping from directory names to filename extensions that should be stored in them. Files with an extension not listed will be ignored and stored in their default location."
+    },
+    {
+      "path": "postprocessor.compare.action",
+      "type": "text",
+      "default": "replace",
+      "description": "The action to take when files do not compare as equal. \"replace\" Replace/Overwrite the old version with the new one \"enumerate\" Add an enumeration index to the filename of the new "
+    },
+    {
+      "path": "postprocessor.compare.equal",
+      "type": "text",
+      "default": "null",
+      "description": "The action to take when files do compare as equal. \"abort:N\" Stop the current extractor run after N consecutive files compared as equal. \"terminate:N\" Stop the current extractor ru"
+    },
+    {
+      "path": "postprocessor.compare.shallow",
+      "type": "boolean",
+      "default": false,
+      "description": "Only compare file sizes. Do not read and compare their content."
+    },
+    {
+      "path": "postprocessor.directory.event",
+      "type": "json",
+      "default": "prepare",
+      "description": "The event(s) for which directory_ `Format Strings`_ are (re)evaluated. See `metadata.event`_ for a list of available events."
+    },
+    {
+      "path": "postprocessor.exec.archive",
+      "type": "text",
+      "default": null,
+      "description": "Database to store IDs of executed commands in, similar to `extractor..archive`_. The following archive options are also supported: archive-format archive-prefix archive-pragma arch"
+    },
+    {
+      "path": "postprocessor.exec.async",
+      "type": "boolean",
+      "default": false,
+      "description": "Controls whether to wait for a subprocess to finish or to let it run asynchronously."
+    },
+    {
+      "path": "postprocessor.exec.command",
+      "type": "json",
+      "default": null,
+      "description": "The command to run. If this is a string, it will be executed using the system's shell, e.g. /bin/sh. Any {} will be replaced with the full path of a file or target directory, depen"
+    },
+    {
+      "path": "postprocessor.exec.commands",
+      "type": "json",
+      "default": null,
+      "description": "Multiple commands to run in succession. All commands after the first returning with a non-zero exit status will not be run."
+    },
+    {
+      "path": "postprocessor.exec.event",
+      "type": "json",
+      "default": "after",
+      "description": "The event(s) for which `exec.command`_ is run. See `metadata.event`_ for a list of available events."
+    },
+    {
+      "path": "postprocessor.exec.output",
+      "type": "boolean",
+      "default": true,
+      "description": "Show output of spawned subprocesses."
+    },
+    {
+      "path": "postprocessor.exec.session",
+      "type": "boolean",
+      "default": false,
+      "description": "Start subprocesses in a new session. On Windows, this means passing CREATE_NEW_PROCESS_GROUP as a creationflags argument to subprocess.Popen On POSIX systems, this means enabling t"
+    },
+    {
+      "path": "postprocessor.exec.verbose",
+      "type": "boolean",
+      "default": true,
+      "description": "Include command arguments in logging messages."
+    },
+    {
+      "path": "postprocessor.exec.success",
+      "type": "text",
+      "default": null,
+      "description": "Run these `Action(s)`_ when command succeeds and returns with exit status `0`."
+    },
+    {
+      "path": "postprocessor.exec.error",
+      "type": "text",
+      "default": null,
+      "description": "Run these `Action(s)`_ when command fails and returns with a non-zero exit status."
+    },
+    {
+      "path": "postprocessor.hash.chunk-size",
+      "type": "integer",
+      "default": 32768,
+      "description": "Number of bytes read per chunk during file hash computation."
+    },
+    {
+      "path": "postprocessor.hash.event",
+      "type": "json",
+      "default": "file",
+      "description": "The event(s) for which file hashes are computed. See `metadata.event`_ for a list of available events."
+    },
+    {
+      "path": "postprocessor.hash.filename",
+      "type": "boolean",
+      "default": false,
+      "description": "Rebuild filenames after computing hash digests and adding them to the metadata dict."
+    },
+    {
+      "path": "postprocessor.hash.hashes",
+      "type": "json",
+      "default": "md5,sha1",
+      "description": "Hash digests to compute. For a list of available hash algorithms, run .. code:: python -c \"import hashlib; print('\\n'.join(hashlib.algorithms_available))\" or see python/hashlib. If"
+    },
+    {
+      "path": "postprocessor.metadata.mode",
+      "type": "text",
+      "default": "json",
+      "description": "Selects how to process metadata. \"json\" Write metadata using |json.dump()|_ \"jsonl\" Write metadata in JSON Lines format \"tags\" Write tags separated by newlines \"print\" Write the re"
+    },
+    {
+      "path": "postprocessor.metadata.filename",
+      "type": "text",
+      "default": null,
+      "description": "A `Format String`_ to generate filenames for metadata files. (see extractor.filename) Using \"-\" as filename will write all output to stdout. If this option is set, `metadata.extens"
+    },
+    {
+      "path": "postprocessor.metadata.directory",
+      "type": "json",
+      "default": ".",
+      "description": "Directory where metadata files are stored in relative to `metadata.base-directory`_."
+    },
+    {
+      "path": "postprocessor.metadata.base-directory",
+      "type": "boolean",
+      "default": false,
+      "description": "Selects the relative location for metadata files. false Current target location for file downloads (base-directory_ + directory_) true Current base-directory_ location any |Path|_ "
+    },
+    {
+      "path": "postprocessor.metadata.extension",
+      "type": "text",
+      "default": null,
+      "description": "Filename extension for metadata files that will be appended to the original file names."
+    },
+    {
+      "path": "postprocessor.metadata.extension-format",
+      "type": "text",
+      "default": null,
+      "description": "Custom `Format String`_ to generate filename extensions for metadata files, which will replace the original filename extension."
+    },
+    {
+      "path": "postprocessor.metadata.metadata-path",
+      "type": "text",
+      "default": null,
+      "description": "Insert the path of generated files into metadata dictionaries as the given name."
+    },
+    {
+      "path": "postprocessor.metadata.event",
+      "type": "json",
+      "default": "file",
+      "description": "The event(s) for which metadata gets written to a file. Available events are: init After post processor initialization and before the first file download finalize On extractor shut"
+    },
+    {
+      "path": "postprocessor.metadata.include",
+      "type": "json",
+      "default": null,
+      "description": "Include only the given top-level keys when writing JSON data."
+    },
+    {
+      "path": "postprocessor.metadata.exclude",
+      "type": "json",
+      "default": null,
+      "description": "Exclude all given keys from written JSON data."
+    },
+    {
+      "path": "postprocessor.metadata.fields",
+      "type": "json",
+      "default": null,
+      "description": "\"mode\": \"delete\" A list of metadata field names to remove. \"mode\": \"modify\" An object with metadata field names mapping to a `Format String`_ whose result is assigned to that field"
+    },
+    {
+      "path": "postprocessor.metadata.content-format",
+      "type": "json",
+      "default": null,
+      "description": "Custom `Format String(s)`_ to build the content of metadata files with."
+    },
+    {
+      "path": "postprocessor.metadata.ascii",
+      "type": "boolean",
+      "default": false,
+      "description": "Escape all non-ASCII characters. See the ensure_ascii argument of |json.dump()|_ for further details."
+    },
+    {
+      "path": "postprocessor.metadata.indent",
+      "type": "text",
+      "default": 4,
+      "description": "Indentation level of JSON output. See the indent argument of |json.dump()|_ for further details."
+    },
+    {
+      "path": "postprocessor.metadata.separators",
+      "type": "json",
+      "default": [
+        ", ",
+        ": "
+      ],
+      "description": "<item separator> - <key separator> pair to separate JSON keys and values with. See the separators argument of |json.dump()|_ for further details."
+    },
+    {
+      "path": "postprocessor.metadata.sort",
+      "type": "boolean",
+      "default": false,
+      "description": "Sort output by `key`. See the sort_keys argument of |json.dump()|_ for further details."
+    },
+    {
+      "path": "postprocessor.metadata.open",
+      "type": "text",
+      "default": "w",
+      "description": "The mode in which metadata files get opened. For example, use \"a\" to append to a file's content or \"w\" to truncate it. See the mode argument of |open()|_ for further details."
+    },
+    {
+      "path": "postprocessor.metadata.encoding",
+      "type": "text",
+      "default": "utf-8",
+      "description": "Name of the encoding used to encode a file's content. See the encoding argument of |open()|_ for further details."
+    },
+    {
+      "path": "postprocessor.metadata.newline",
+      "type": "text",
+      "default": null,
+      "description": "The newline sequence used in metadata files. If null, any \\n characters written are translated to the system default line separator. See the newline argument of |open()|_ for furth"
+    },
+    {
+      "path": "postprocessor.metadata.private",
+      "type": "boolean",
+      "default": false,
+      "description": "Include private fields, i.e. fields whose name starts with an underscore."
+    },
+    {
+      "path": "postprocessor.metadata.skip",
+      "type": "boolean",
+      "default": false,
+      "description": "Do not overwrite already existing files."
+    },
+    {
+      "path": "postprocessor.metadata.archive",
+      "type": "text",
+      "default": null,
+      "description": "Database to store IDs of generated metadata files in, similar to `extractor..archive`_. The following archive options are also supported: archive-format archive-prefix archive-prag"
+    },
+    {
+      "path": "postprocessor.metadata.mtime",
+      "type": "boolean",
+      "default": false,
+      "description": "Set modification times of generated metadata files according to the accompanying downloaded file. Enabling this option will only have an effect if there is actual mtime metadata av"
+    },
+    {
+      "path": "postprocessor.mtime.event",
+      "type": "json",
+      "default": "file",
+      "description": "The event(s) for which `mtime.key`_ or `mtime.value`_ get evaluated. See `metadata.event`_ for a list of available events."
+    },
+    {
+      "path": "postprocessor.mtime.key",
+      "type": "text",
+      "default": "date",
+      "description": "Name of the metadata field whose value should be used. This value must be either a Unix timestamp or a |type-datetime|_ object."
+    },
+    {
+      "path": "postprocessor.mtime.value",
+      "type": "text",
+      "default": null,
+      "description": "The `Format String`_ whose value should be used. The resulting value must be either a Unix timestamp or a |type-datetime|_ object. Note: Unlike standard `Format Strings`_, replacem"
+    },
+    {
+      "path": "postprocessor.python.archive",
+      "type": "text",
+      "default": null,
+      "description": "Database to store IDs of called Python functions in, similar to `extractor..archive`_. The following archive options are also supported: archive-format archive-prefix archive-pragm"
+    },
+    {
+      "path": "postprocessor.python.event",
+      "type": "json",
+      "default": "file",
+      "description": "The event(s) for which `python.function`_ gets called. See `metadata.event`_ for a list of available events."
+    },
+    {
+      "path": "postprocessor.python.expression",
+      "type": "text",
+      "default": null,
+      "description": "A Python Expression_ to evaluate."
+    },
+    {
+      "path": "postprocessor.python.function",
+      "type": "text",
+      "default": null,
+      "description": "The Python function to call. | This function is specified as <module>:<function name>, where | <module> is a |Module|_ and <function name> is the name of the function in that modul"
+    },
+    {
+      "path": "postprocessor.python.mode",
+      "type": "text",
+      "default": "function",
+      "description": "Selects what Python code to run. \"eval\" Evaluate an expression function\" Call a function"
+    },
+    {
+      "path": "postprocessor.rename.from",
+      "type": "text",
+      "default": null,
+      "description": "The `Format String`_ for filenames to rename. When no value is given, `extractor..filename`_ is used."
+    },
+    {
+      "path": "postprocessor.rename.to",
+      "type": "text",
+      "default": null,
+      "description": "The `Format String`_ for target filenames. When no value is given, `extractor..filename`_ is used."
+    },
+    {
+      "path": "postprocessor.rename.skip",
+      "type": "boolean",
+      "default": true,
+      "description": "Do not rename a file when another file with the target name already exists."
+    },
+    {
+      "path": "postprocessor.ugoira.extension",
+      "type": "text",
+      "default": "webm",
+      "description": "Filename extension for the resulting video files."
+    },
+    {
+      "path": "postprocessor.ugoira.ffmpeg-args",
+      "type": "json",
+      "default": null,
+      "description": "Additional |ffmpeg| command-line arguments. .. _ugoira.ffmpeg-demuxer:"
+    },
+    {
+      "path": "postprocessor.ugoira.mode",
+      "type": "text",
+      "default": "auto",
+      "description": "|ffmpeg| demuxer to read and process input files with."
+    },
+    {
+      "path": "postprocessor.ugoira.ffmpeg-location",
+      "type": "text",
+      "default": "ffmpeg",
+      "description": "Location of the ffmpeg (or avconv) executable to use."
+    },
+    {
+      "path": "postprocessor.ugoira.mkvmerge-args",
+      "type": "json",
+      "default": null,
+      "description": "Additional mkvmerge command-line arguments."
+    },
+    {
+      "path": "postprocessor.ugoira.mkvmerge-location",
+      "type": "text",
+      "default": "mkvmerge",
+      "description": "Location of the mkvmerge executable for use with the mkvmerge demuxer."
+    },
+    {
+      "path": "postprocessor.ugoira.mkvmerge-metadata",
+      "type": "boolean",
+      "default": true,
+      "description": "Let mkvmerge write BPS, DURATION, NUMBER_OF_BYTES, and NUMBER_OF_FRAMES metadata tags."
+    },
+    {
+      "path": "postprocessor.ugoira.mkvmerge-mtime",
+      "type": "boolean",
+      "default": false,
+      "description": "Set the `date` segment information field of files processed with mkvmerge. Note: Requires mkvmerge version 95.0 or higher"
+    },
+    {
+      "path": "postprocessor.ugoira.mkvmerge-output",
+      "type": "boolean",
+      "default": false,
+      "description": "Enable mkvmerge output."
+    },
+    {
+      "path": "postprocessor.ugoira.ffmpeg-output",
+      "type": "text",
+      "default": "error",
+      "description": "Controls |ffmpeg| output. true Enable |ffmpeg| output false Disable all |ffmpeg| output any string Pass -hide_banner and -loglevel with this value as argument to |ffmpeg|"
+    },
+    {
+      "path": "postprocessor.ugoira.ffmpeg-twopass",
+      "type": "boolean",
+      "default": false,
+      "description": "Enable Two-Pass encoding."
+    },
+    {
+      "path": "postprocessor.ugoira.framerate",
+      "type": "text",
+      "default": "auto",
+      "description": "Controls the frame rate argument (-r) for |ffmpeg| \"auto\" Automatically assign a fitting frame rate based on delays between frames. \"uniform\" Like auto, but assign an explicit fram"
+    },
+    {
+      "path": "postprocessor.ugoira.keep-files",
+      "type": "boolean",
+      "default": false,
+      "description": "Keep ZIP archives after conversion."
+    },
+    {
+      "path": "postprocessor.ugoira.libx264-prevent-odd",
+      "type": "boolean",
+      "default": true,
+      "description": "Prevent \"width/height not divisible by 2\" errors when using libx264 or libx265 encoders by applying a simple cropping filter. See this Stack Overflow thread for more information. T"
+    },
+    {
+      "path": "postprocessor.ugoira.metadata",
+      "type": "text",
+      "default": true,
+      "description": "When using \"mode\": \"archive\", save Ugoira frame delay data as animation.json within the archive file. If this is a string, use it as alternate filename for frame delay files."
+    },
+    {
+      "path": "postprocessor.ugoira.mtime",
+      "type": "boolean",
+      "default": true,
+      "description": "Set modification times of generated ugoira animations."
+    },
+    {
+      "path": "postprocessor.ugoira.repeat-last-frame",
+      "type": "boolean",
+      "default": true,
+      "description": "Allow repeating the last frame when necessary to prevent it from only being displayed for a very short amount of time."
+    },
+    {
+      "path": "postprocessor.ugoira.skip",
+      "type": "boolean",
+      "default": true,
+      "description": "Do not convert frames if target file already exists."
+    },
+    {
+      "path": "postprocessor.zip.compression",
+      "type": "text",
+      "default": "store",
+      "description": "Compression method to use when writing the archive."
+    },
+    {
+      "path": "postprocessor.zip.extension",
+      "type": "text",
+      "default": "zip",
+      "description": "Filename extension for the created ZIP archive."
+    },
+    {
+      "path": "postprocessor.zip.files",
+      "type": "json",
+      "default": null,
+      "description": "List of extra files to be added to a ZIP archive."
+    },
+    {
+      "path": "postprocessor.zip.keep-files",
+      "type": "boolean",
+      "default": false,
+      "description": "Keep the actual files after writing them to a ZIP archive."
+    },
+    {
+      "path": "postprocessor.zip.mode",
+      "type": "text",
+      "default": "default",
+      "description": "\"default\" Write the central directory file header once after everything is done or an exception is raised. \"safe\" Update the central directory file header each time a file is store"
+    },
+    {
+      "path": "extractor.modules",
+      "type": "json",
+      "default": null,
+      "description": "List of internal modules to load when searching for a suitable extractor class. Useful to reduce startup time and memory usage."
+    },
+    {
+      "path": "extractor.module-sources",
+      "type": "json",
+      "default": null,
+      "description": "List of directories to load external extractor modules from. Any file in a specified directory with a .py filename extension gets imported and searched for potential extractors, i."
+    },
+    {
+      "path": "extractor.category-map",
+      "type": "json",
+      "default": null,
+      "description": "A JSON object mapping category names to their replacements."
+    },
+    {
+      "path": "extractor.config-map",
+      "type": "json",
+      "default": null,
+      "description": "Duplicate the configuration settings of extractor `categories` to other names. For example, a \"naver\": \"naver-blog\" key-value pair will make all naver config settings available for"
+    },
+    {
+      "path": "jinja.environment",
+      "type": "json",
+      "default": null,
+      "description": "Initialization parameters for the |jinja| Environment object."
+    },
+    {
+      "path": "jinja.policies",
+      "type": "json",
+      "default": null,
+      "description": "|jinja| Policies"
+    },
+    {
+      "path": "jinja.filters",
+      "type": "text",
+      "default": null,
+      "description": "A Python |Module|_ containing custom |jinja| filters"
+    },
+    {
+      "path": "jinja.tests",
+      "type": "text",
+      "default": null,
+      "description": "A Python |Module|_ containing custom |jinja| tests"
+    },
+    {
+      "path": "cache.file",
+      "type": "text",
+      "default": null,
+      "description": "Path of the SQLite3 database used to cache login sessions, cookies and API tokens across `gallery-dl` invocations. Set this option to \":memory:\", null, or an invalid path to disabl"
+    },
+    {
+      "path": "extractor.deviantart.client-id",
+      "type": "json",
+      "default": null,
+      "description": ""
+    },
+    {
+      "path": "extractor.deviantart.client-secret",
+      "type": "json",
+      "default": null,
+      "description": ""
+    },
+    {
+      "path": "extractor.flickr.api-key",
+      "type": "text",
+      "default": null,
+      "description": ""
+    },
+    {
+      "path": "extractor.flickr.api-secret",
+      "type": "text",
+      "default": null,
+      "description": ""
+    },
+    {
+      "path": "extractor.mangadex.client-id",
+      "type": "text",
+      "default": null,
+      "description": ""
+    },
+    {
+      "path": "extractor.mangadex.client-secret",
+      "type": "text",
+      "default": null,
+      "description": ""
+    },
+    {
+      "path": "extractor.reddit.client-id",
+      "type": "text",
+      "default": null,
+      "description": ""
+    },
+    {
+      "path": "extractor.reddit.user-agent",
+      "type": "text",
+      "default": null,
+      "description": ""
+    },
+    {
+      "path": "extractor.smugmug.api-key",
+      "type": "text",
+      "default": null,
+      "description": ""
+    },
+    {
+      "path": "extractor.smugmug.api-secret",
+      "type": "text",
+      "default": null,
+      "description": ""
+    },
+    {
+      "path": "extractor.tumblr.api-key",
+      "type": "text",
+      "default": null,
+      "description": ""
+    },
+    {
+      "path": "extractor.tumblr.api-secret",
+      "type": "text",
+      "default": null,
+      "description": ""
+    }
+  ]
+}

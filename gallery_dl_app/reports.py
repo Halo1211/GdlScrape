@@ -25,7 +25,6 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
-    QStyle,
     QVBoxLayout,
 )
 
@@ -49,6 +48,7 @@ from .core import (
     timestamp_slug,
     unique_path,
 )
+from .themes import action_icon
 
 
 def app_data_backup_members(
@@ -891,13 +891,8 @@ Important
 
         row = QHBoxLayout()
         row.setSpacing(10)
-        icon_type = {
-            "info": QStyle.SP_MessageBoxInformation,
-            "warning": QStyle.SP_MessageBoxWarning,
-            "error": QStyle.SP_MessageBoxCritical,
-        }.get(level, QStyle.SP_MessageBoxInformation)
         icon_label = QLabel()
-        icon_label.setPixmap(self.style().standardIcon(icon_type).pixmap(20, 20))
+        icon_label.setPixmap(action_icon(level if level in {"info", "warning", "error"} else "info", dark=self.current_theme == "dark").pixmap(20, 20))
         icon_label.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
         icon_label.setFixedWidth(24)
         body = QLabel(str(message))

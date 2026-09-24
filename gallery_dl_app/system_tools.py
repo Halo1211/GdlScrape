@@ -4,6 +4,7 @@ import json
 import queue
 import re
 import shutil
+import sys
 import threading
 from pathlib import Path
 from typing import Optional
@@ -651,8 +652,8 @@ Example:
 
             # Extra booru / adult-imageboard presets. These are still normal
             # gallery-dl extractor categories, not special downloader logic.
-            {"key": "hypnohub", "name": "HypnoHub", "group": "Booru", "directory": ["HypnoHub", "{subcategory}", "{search_tags}"], "filename": "{id}_{md5}.{extension}", "sleep-request": "2.0-5.0", "sleep-429": "120-600", "cookies": True, "special": "gelbooru_v02", "note": "Gelbooru 0.2 style site. Pakai jeda lebih pelan, tags blacklist/whitelist, archive, dan cookies bila perlu."},
-            {"key": "paheal", "name": "Rule34 Paheal", "group": "Booru", "directory": ["Rule34-Paheal", "{subcategory}", "{search_tags}"], "filename": "{id}_{filename}.{extension}", "sleep-request": "2.0-4.0", "cookies": True, "note": "rule34.paheal.net. Category config: paheal."},
+            {"key": "hypnohub", "name": "HypnoHub", "group": "Booru", "directory": ["HypnoHub", "{subcategory}", "{search_tags|pool|favorite_id|id}"], "filename": "{id}_{md5}.{extension}", "sleep-request": "2.0-5.0", "sleep-429": "120-600", "cookies": True, "special": "gelbooru_v02", "note": "Gelbooru 0.2 style site. Pakai jeda lebih pelan, tags blacklist/whitelist, archive, dan cookies bila perlu."},
+            {"key": "paheal", "name": "Rule34 Paheal", "group": "Booru", "directory": ["Rule34-Paheal", "{subcategory}", "{search_tags|id}"], "filename": "{id}_{filename}.{extension}", "sleep-request": "2.0-4.0", "cookies": True, "note": "rule34.paheal.net. Category config: paheal."},
             {"key": "rule34us", "name": "Rule34.us", "group": "Booru", "directory": ["Rule34.us", "{subcategory}"], "filename": "{id}_{md5}.{extension}", "sleep-request": "2.0-4.0", "cookies": True, "note": "Rule34.us posts/tag search."},
             {"key": "rule34xyz", "name": "Rule34.xyz", "group": "Booru", "directory": ["Rule34.xyz", "{subcategory}"], "filename": "{id}_{num}.{extension}", "sleep-request": "2.0-4.0", "cookies": True, "note": "Playlist/posts/tag search."},
             {"key": "rule34vault", "name": "R34 Vault", "group": "Booru", "directory": ["R34-Vault", "{subcategory}"], "filename": "{id}_{num}.{extension}", "sleep-request": "2.0-4.0", "cookies": True, "note": "Playlists, posts, tag search."},
@@ -1209,6 +1210,8 @@ Notes:
         dark = normalized == "dark"
         app.setPalette(theme_palette(dark))
         app.setStyleSheet(DARK_QSS if dark else LIGHT_QSS)
+        if hasattr(self, "_refresh_action_icons"):
+            self._refresh_action_icons()
         icon = application_icon(dark=dark)
         app.setWindowIcon(icon)
         self.setWindowIcon(icon)
@@ -1315,7 +1318,12 @@ Notes:
         # session cannot partially apply and then leave stale queue state.
         parse_text_database(commands_text)
         saved_cmd = (data.get("gdl_cmd") or "").strip()
-        if REDACTED in saved_cmd:
+        bundled_cmd = Path(sys.executable).resolve().with_name("gallery-dl.exe") if getattr(sys, "frozen", False) else None
+        if bundled_cmd is not None and bundled_cmd.is_file():
+            # A session written by a source install or older one-file release
+            # must not silently replace the downloader shipped with this EXE.
+            self.gdl_cmd = str(bundled_cmd)
+        elif REDACTED in saved_cmd:
             self.append_log(
                 "[session] ignored a gallery-dl command whose credentials "
                 "were removed; keeping the detected local command"

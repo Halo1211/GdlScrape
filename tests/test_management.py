@@ -498,6 +498,7 @@ class AccountManagementHelperTests(unittest.TestCase):
         self.assertEqual(argv[:3], ["py", "-m", "gallery_dl"])
         self.assertIn("--config", argv)
         self.assertIn("--cache-file", argv)
+        self.assertIn(["-o", "extractor.input=true"], [argv[index:index + 2] for index in range(len(argv) - 1)])
         self.assertEqual(argv[-1], "oauth:mastodon:mastodon.social")
         self.assertEqual(
             account_action_argv(
