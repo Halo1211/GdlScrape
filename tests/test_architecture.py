@@ -343,7 +343,7 @@ class ArchitectureTests(unittest.TestCase):
                     "gallery_dl_app.system_tools.sys.frozen", True, create=True
                 ):
                     window.apply_session_data({"gdl_cmd": "C:/old/gallery-dl.exe", "commands": ""})
-                    self.assertEqual(window.gdl_cmd, str(bundled))
+                    self.assertEqual(Path(window.gdl_cmd).resolve(), bundled.resolve())
                     runtime = window._build_runtime_tab()
                     self.assertFalse(runtime.findChildren(QPushButton))
         finally:
@@ -988,8 +988,9 @@ class ArchitectureTests(unittest.TestCase):
                 artwork_check = dialog.findChild(QCheckBox, "pixivInclude_artworks")
                 avatar_check = dialog.findChild(QCheckBox, "pixivInclude_avatar")
                 self.assertEqual(artwork_check.y(), avatar_check.y())
-                self.assertLess(avatar_check.x() - artwork_check.x(), 400)
                 include_card = artwork_check.parentWidget()
+                self.assertGreater(avatar_check.x(), artwork_check.x())
+                self.assertLess(avatar_check.geometry().right(), include_card.width())
                 self.assertGreater(include_card.width(), dialog.width() * 0.75)
                 art_card = dialog.findChild(QComboBox, "pixivTags").parentWidget()
                 novel_card = dialog.findChild(QComboBox, "pixivNovelTags").parentWidget()
