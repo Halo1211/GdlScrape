@@ -169,11 +169,19 @@ class ArchitectureTests(unittest.TestCase):
         self.assertIn("gallery-dl`](https://gdl-org.github.io/docs/) 1.32.14 or newer", readme)
 
     def test_standalone_build_bundles_dynamic_gallery_dl_extractors(self):
-        spec = Path("packaging/GdlScrape.spec").read_text(encoding="utf-8")
+        import runpy
+        from types import SimpleNamespace
+        from unittest.mock import Mock
 
-        self.assertIn("collect_submodules", spec)
-        self.assertIn('collect_submodules("gallery_dl.extractor")', spec)
-        self.assertIn("hiddenimports=gallery_dl_hiddenimports", spec)
+        analysis = Mock(return_value=SimpleNamespace(binaries=[], pure=[], scripts=[], datas=[]))
+        packages = ("gallery_dl.extractor", "gallery_dl.downloader", "gallery_dl.postprocessor")
+        with patch("PyInstaller.utils.hooks.collect_submodules", side_effect=lambda name: [name + ".fixture"]) as collect:
+            runpy.run_path("packaging/GdlScrape.spec", init_globals={
+                "SPECPATH": str(Path("packaging").resolve()), "Analysis": analysis,
+                "PYZ": Mock(), "EXE": Mock(), "COLLECT": Mock(),
+            })
+        self.assertEqual([call.args[0] for call in collect.call_args_list], list(packages))
+        self.assertEqual(analysis.call_args.kwargs["hiddenimports"], [name + ".fixture" for name in packages])
 
     def test_responsibilities_live_in_separate_mixins(self):
         self.assertIn("_build_ui", UiShellMixin.__dict__)

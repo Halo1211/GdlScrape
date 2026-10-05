@@ -55,9 +55,15 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(parsed.options[-1], ((), "retries", 7))
 
     def test_append_preserves_boundary_looking_option_value(self):
-        command = append_extra_args_to_command('gallery-dl --filename=-- https://example.com/a', "--retries 7")
+        original = 'gallery-dl --filename=-- https://example.com/a'
+        before = build_parser().parse_args(split_command(original)[1:])
+        command = append_extra_args_to_command(original, "--retries 7")
         parsed = build_parser().parse_args(split_command(command)[1:])
-        self.assertEqual(parsed.filename, "--")
+        # Older argparse versions interpret an attached "--" differently.
+        # Augmentation must preserve the original argv and native interpretation.
+        self.assertIn("--filename=--", split_command(command))
+        self.assertEqual(parsed.filename, before.filename)
+        self.assertEqual(parsed.urls, before.urls)
         self.assertEqual(parsed.options[-1], ((), "retries", 7))
 
     def test_base_retry_setting_is_not_overridden_by_gui_default(self):
