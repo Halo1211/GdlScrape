@@ -1,0 +1,18 @@
+{
+  "extractor": {
+    "reddit": {
+      "directory": ["reddit", "{subreddit}", "{id}"],
+      "whitelist": ["imgur", "redgifs"],
+      "parent-directory": true,
+      "parent-metadata": "_reddit"
+    },
+    "reddit>imgur": {
+      "directory": [],
+      "filename": "{_reddit[id]}_{id}.{extension}"
+    },
+    "reddit>redgifs": {
+      "directory": [],
+      "filename": "{_reddit[id]}_{id}.{extension}"
+    }
+  }
+}

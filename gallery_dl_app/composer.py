@@ -1,10 +1,4 @@
-"""Unified gallery-dl download and configuration composer.
-
-The official gallery-dl model is simple: configuration provides reusable
-defaults and command-line options override those defaults for a single run.
-This module mirrors that model in one UI instead of exposing separate command
-and config builders with overlapping fields.
-"""
+"""Job preparation and saved configuration, sharing the parsing helpers."""
 
 from __future__ import annotations
 
@@ -13,19 +7,20 @@ import dis
 import json
 import re
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
 from urllib.parse import urlsplit
 
-from PySide6.QtCore import QPointF, QProcess, QRectF, Qt, QUrl
+from PySide6.QtCore import QPointF, QProcess, QRectF, Qt, QUrl, QTimer
 from PySide6.QtGui import QColor, QPainter, QPen, QPolygonF, QTextCursor
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkProxy, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QCompleter,
     QDialog,
     QFileDialog,
     QFrame,
@@ -40,6 +35,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
+    QSplitter,
     QStackedWidget,
     QTabWidget,
     QTableWidget,
@@ -50,25 +46,38 @@ from PySide6.QtWidgets import (
 
 from .core import (
     APP_DIR,
-    APP_VERSION,
     IS_WINDOWS,
     MANAGED_AUTH_KEYS,
     OAuthOutputRedactor,
     atomic_write_text,
     command_string_to_argv,
+    insert_gallery_dl_arguments,
     detect_config_path,
     is_sensitive_option_key,
+    parse_text_database,
     quote_arg_for_preview,
     read_text_safely,
     redact_sensitive_argv,
     safe_bool,
+    safe_expand_path,
+    validate_finite_numbers,
     split_command,
     timestamp_slug,
     unique_path,
     validate_cookies_txt,
 )
-from .url_builder import URL_RECIPE_MODES, build_site_url, url_recipe_hint
+from .link_builder import LinkBuilder
+from .url_builder import URL_MODE_LABELS, validate_supported_url
 from .oauth_flow import local_oauth_callback_url, oauth_flow_guidance
+from .config_maker import (
+    ConfigPath, apply_config_delta, config_changes, config_path_value, contains_config_secrets, edit_config_path, filename_example,
+    installed_page_types, installed_site_catalog, resolve_config_path,
+)
+from .config_value_editor import StructuredConfigEditor
+from .postprocessor_editor import PostprocessorEditor, resolved_postprocessor_action
+from .config_examples import EXAMPLES
+from .content_filter_editor import ContentFilterEditor
+from .path_rules_editor import PathRulesEditor
 
 
 @dataclass
@@ -137,6 +146,11 @@ class ConfigOptionSpec:
     choices: tuple[object, ...] = ()
     sensitive: bool = False
     scope: str = "site"
+    allowed_types: tuple[str, ...] = ()
+    string_items: bool = False
+    example: str = ""
+    choice_help: dict[str, str] = field(default_factory=dict)
+    suggestions: tuple[object, ...] = ()
 
 
 _GENERAL_OPTION_DEFAULTS: dict[str, tuple[object, str, str]] = {
@@ -218,12 +232,14 @@ _SITE_OPTION_DEFAULTS: dict[str, dict[str, tuple[object, str, str, tuple[object,
     "pixiv": {
         "captions": (False, "Content", "Download artwork captions.", (True, False)),
         "comments": (False, "Content", "Fetch comments.", (True, False)),
-        "include": (["artworks"], "Content", "Related profile sections to include.", ()),
+        "include": (["artworks"], "Content", "Related profile sections to include.", (
+            "artworks", "avatar", "background", "favorite", "novel-user", "novel-bookmark", "sketch",
+        )),
         "max-posts": (None, "Limits", "Maximum number of posts.", ()),
         "metadata": (False, "Metadata", "Fetch extended metadata.", (True, False)),
         "metadata-bookmark": (False, "Metadata", "Fetch bookmark metadata.", (True, False)),
         "sanity": (True, "Behavior", "Enable Pixiv sanity checks.", (True, False)),
-        "tags": ("japanese", "Metadata", "Tag translation/language mode.", ("japanese", "translated")),
+        "tags": ("japanese", "Metadata", "Tag translation/language mode.", ("japanese", "translated", "original")),
         "ugoira": (True, "Content", "Download Ugoira or original frame archive.", (True, False, "original")),
         "refresh-token": (None, "Authentication", "Pixiv OAuth refresh token.", ()),
     },
@@ -286,6 +302,88 @@ _SITE_OPTION_DEFAULTS: dict[str, dict[str, tuple[object, str, str, tuple[object,
 }
 _SITE_OPTION_DEFAULTS["coomer"] = _SITE_OPTION_DEFAULTS["kemono"]
 
+# The first screen in Site Config Studio shows a small, useful subset. Search
+# and "Show all settings" still expose every discovered option.
+_STARTER_SHARED_OPTIONS = frozenset({
+    "base-directory", "filename", "archive", "retries", "timeout",
+})
+_STARTER_SITE_OPTIONS = (
+    "include", "original", "quality", "videos", "replies", "comments",
+    "metadata", "tags", "ugoira", "pinned", "previews", "embeds",
+    "max-posts", "limit",
+)
+_FRIENDLY_OPTION_NAMES: dict[str, tuple[str, str]] = {
+    "base-directory": ("Save files in", "Simpan file di"),
+    "filename": ("File name", "Nama file"),
+    "archive": ("Download history file", "File riwayat unduhan"),
+    "retries": ("Retry failed downloads", "Ulangi unduhan gagal"),
+    "timeout": ("Connection timeout (seconds)", "Batas waktu koneksi (detik)"),
+    "include": ("Include profile sections", "Sertakan bagian profil"),
+    "original": ("Use original files", "Gunakan file asli"),
+    "quality": ("Image quality", "Kualitas gambar"),
+    "videos": ("Video downloads", "Unduhan video"),
+    "replies": ("Include replies", "Sertakan balasan"),
+    "comments": ("Include comments", "Sertakan komentar"),
+    "metadata": ("Extra information", "Informasi tambahan"),
+    "tags": ("Tag language", "Bahasa tag"),
+    "ugoira": ("Animated artwork", "Karya animasi"),
+    "pinned": ("Include pinned posts", "Sertakan postingan tersemat"),
+    "previews": ("Use preview images", "Gunakan gambar pratinjau"),
+    "embeds": ("Include embedded media", "Sertakan media tersemat"),
+    "max-posts": ("Maximum posts", "Maksimum postingan"),
+    "limit": ("Results per request", "Hasil per permintaan"),
+    "compression": ("Archive compression", "Kompresi arsip"),
+    "extension": ("File extension", "Ekstensi file"),
+    "files": ("Files to include", "File yang disertakan"),
+    "keep-files": ("Keep original files", "Pertahankan file asli"),
+    "mode": ("Processing mode", "Cara pemrosesan"),
+    "enabled": ("Enable this feature", "Aktifkan fitur ini"),
+    "depth": ("How far to follow linked pages", "Seberapa jauh mengikuti halaman terkait"),
+    "filter": ("Choose which files to download", "Pilih file yang diunduh"),
+    "image-filter": ("Filter images", "Saring gambar"),
+    "filesize-min": ("Minimum file size", "Ukuran file minimum"),
+    "filesize-max": ("Maximum file size", "Ukuran file maksimum"),
+    "rate": ("Download speed limit", "Batas kecepatan unduhan"),
+    "proxy": ("Connect through a proxy", "Hubungkan melalui proxy"),
+    "chunk-size": ("Size of each transfer block", "Ukuran setiap blok transfer"),
+    "postprocessors": ("Actions after downloading", "Tindakan setelah mengunduh"),
+    "headers": ("Request headers", "Header permintaan"),
+    "progress": ("Show download progress", "Tampilkan progres unduhan"),
+    "log": ("Log file", "File log"),
+    "directory": ("Subfolders", "Subfolder"),
+    "event": ("When to run this action", "Kapan tindakan dijalankan"),
+    "command": ("Command to run", "Perintah yang dijalankan"),
+    "commands": ("Commands to run", "Perintah yang dijalankan"),
+    "mtime": ("Preserve file modification time", "Pertahankan waktu perubahan file"),
+    "part": ("Use temporary files during downloads", "Gunakan file sementara saat mengunduh"),
+    "verify": ("Verify server certificates", "Periksa sertifikat server"),
+    "skip": ("Handle existing files", "Penanganan file yang sudah ada"),
+}
+_STARTER_OPTION_HELP: dict[str, tuple[str, str]] = {
+    "base-directory": ("Choose the main folder for this website's downloads.", "Pilih folder utama unduhan situs ini."),
+    "filename": ("Pattern for saved file names. Keep {extension} so files retain their type.", "Pola nama file tersimpan. Pertahankan {extension} agar jenis file tetap benar."),
+    "archive": ("Keeps a list of downloaded items so repeats can be skipped.", "Menyimpan daftar item terunduh agar unduhan berulang dapat dilewati."),
+    "retries": ("How many times to try again after a failed download.", "Berapa kali mencoba lagi setelah unduhan gagal."),
+    "timeout": ("How long to wait for a response before giving up.", "Lama menunggu respons sebelum berhenti."),
+    "archive-pragma": ("Advanced SQLite options. Leave the default unless needed. One command per row, e.g. journal_mode=WAL. This is a list, without names.", "Opsi lanjutan SQLite. Biarkan bawaan jika tidak diperlukan. Satu perintah per baris, mis. journal_mode=WAL. Ini daftar, tanpa kolom nama."),
+    "archive-event": ("Choose when to record a download: file = after saving a file; after = after finishing a post; skip = when a file is skipped. file is the usual choice.", "Pilih kapan riwayat dicatat: file = setelah file tersimpan; after = setelah satu postingan selesai; skip = saat file dilewati. Biasanya cukup file."),
+    "extension-map": ("Rename a file extension: left = original extension, right = replacement. Example: jpeg → jpg. This changes the name, not the file format.", "Ganti nama ekstensi: kiri = ekstensi asal, kanan = pengganti. Contoh: jpeg → jpg. Ini mengubah nama, bukan format isi file."),
+    "previews": ("Save preview images too. For Instagram: Enabled = all previews; Disabled = none; List = choose audio covers and/or video thumbnails.", "Simpan gambar pratinjau juga. Untuk Instagram: Aktif = semua pratinjau; Nonaktif = tidak ada; Daftar = pilih sampul audio dan/atau thumbnail video."),
+}
+_INSTAGRAM_VIDEO_HELP = {
+    "true": ("Download videos using the default mode (yt-dlp).", "Unduh video dengan mode bawaan (yt-dlp)."),
+    '"dash"': ("Download and combine the separate video/audio streams using yt-dlp.", "Unduh dan gabungkan aliran video/audio terpisah dengan yt-dlp."),
+    '"ytdl"': ("Use yt-dlp for video downloads.", "Gunakan yt-dlp untuk mengunduh video."),
+    '"merged"': ("Download the already combined video file.", "Unduh file video yang sudah digabung."),
+    "false": ("Skip videos; keep downloading other selected content.", "Lewati video; konten lain yang dipilih tetap diunduh."),
+}
+_INSTAGRAM_INCLUDE_NAMES = {
+    "posts": ("Posts (photos and videos)", "Posts (foto dan video)"),
+    "reels": ("Reels", "Reels"), "tagged": ("Tagged posts", "Tagged (menandai akun)"),
+    "stories": ("Stories", "Stories (story)"), "highlights": ("Story highlights", "Highlights (sorotan)"),
+    "info": ("Profile information", "Info (informasi profil)"), "avatar": ("Profile picture", "Avatar (foto profil)"),
+}
+
 
 @lru_cache(maxsize=1)
 def documented_config_options() -> tuple[dict[str, object], ...]:
@@ -296,6 +394,28 @@ def documented_config_options() -> tuple[dict[str, object], ...]:
         return tuple(item for item in payload["options"] if isinstance(item, dict))
     except (OSError, ValueError, KeyError, TypeError):
         return ()
+
+
+@lru_cache(maxsize=1)
+def config_catalog_version() -> str:
+    try:
+        path = Path(__file__).resolve().parent / "assets" / "config-options.json"
+        return str(json.loads(path.read_text(encoding="utf-8"))["version"]).removeprefix("v")
+    except (OSError, ValueError, KeyError, TypeError):
+        return "unknown"
+
+
+def config_example_value(example: str) -> object:
+    """Read the first JSON container in a manual example, without executing it."""
+    for index, character in enumerate(example):
+        if character in "[{":
+            try:
+                value, _ = json.JSONDecoder().raw_decode(example[index:])
+                if isinstance(value, (dict, list)):
+                    return value
+            except ValueError:
+                continue
+    return None
 
 
 def _option_value_type(key: str, default: object) -> str:
@@ -320,10 +440,14 @@ def _runtime_site_options(category: str) -> tuple[tuple[str, object], ...]:
     try:
         from gallery_dl import extractor
 
-        classes = [item for item in extractor.extractors() if item.category == wanted]
+        classes = [item for item in extractor.extractors() if (
+            item.category == wanted or getattr(item, "basecategory", "") == wanted
+            or any(instance[0] == wanted for instance in getattr(item, "instances", ()))
+        )]
         for cls in classes:
             for base in cls.__mro__:
-                if not str(getattr(base, "__module__", "")).startswith("gallery_dl.extractor"):
+                module = str(getattr(base, "__module__", ""))
+                if not module.startswith("gallery_dl.extractor") or module == "gallery_dl.extractor.common":
                     continue
                 for member in vars(base).values():
                     code = getattr(member, "__code__", None)
@@ -371,13 +495,19 @@ def config_option_definitions(category: str = "") -> tuple[ConfigOptionSpec, ...
     site = str(category or "").strip().lower()
     for entry in documented_config_options():
         path = str(entry.get("path") or "")
-        prefix = f"extractor.{site}." if site else "extractor.*."
-        if not path.startswith(prefix):
+        parts = path.split(".")
+        if len(parts) < 3 or parts[0] != "extractor":
             continue
-        key = path[len(prefix):]
+        family = parts[1].strip("[]").lower().replace("-", "").removesuffix("extractor")
+        applies = parts[1] == "*" or bool(site and (
+            parts[1] == site or parts[1].startswith("[") and family in installed_site_catalog().get(site, ())
+        ))
+        if not applies:
+            continue
+        key = ".".join(parts[2:])
         # A dot indicates an extractor subcategory, which requires a nested
         # JSON object and cannot be edited as a flat category option.
-        if not re.fullmatch(r"[a-z][a-z0-9-]*", key) or key in specs:
+        if not re.fullmatch(r"[a-z][a-z0-9-]*", key) or key in specs and parts[1] == "*":
             continue
         specs[key] = ConfigOptionSpec(
             key=key,
@@ -385,8 +515,9 @@ def config_option_definitions(category: str = "") -> tuple[ConfigOptionSpec, ...
             default=entry.get("default"),
             group="Documented",
             description=str(entry.get("description") or path),
+            choices=tuple(entry.get("choices") or ()),
             sensitive=is_sensitive_option_key(key),
-            scope="site" if site else "general",
+            scope="general" if parts[1] == "*" else "site",
         )
     if site:
         for key, values in _SITE_OPTION_DEFAULTS.get(site, {}).items():
@@ -409,6 +540,23 @@ def config_option_definitions(category: str = "") -> tuple[ConfigOptionSpec, ...
                     default=default,
                     sensitive=is_sensitive_option_key(key),
                 )
+    # Carry the manual's allowed formats and examples into curated and runtime
+    # forms too, rather than losing them when a curated default takes priority.
+    for entry in documented_config_options():
+        parts = str(entry.get("path", "")).split(".")
+        if len(parts) != 3 or parts[0] != "extractor" or parts[2] not in specs:
+            continue
+        family = parts[1].strip("[]").lower().replace("-", "").removesuffix("extractor")
+        if not (parts[1] == "*" or parts[1] == site or parts[1].startswith("[") and family in installed_site_catalog().get(site, ())):
+            continue
+        spec = specs[parts[2]]
+        specs[parts[2]] = replace(
+            spec, allowed_types=tuple(entry.get("allowed_types") or ()),
+            string_items=bool(entry.get("string_items")), example=str(entry.get("example") or ""),
+            choices=tuple(entry.get("choices") or spec.choices), choice_help=dict(entry.get("choice_help") or {}),
+            suggestions=tuple(entry.get("suggestions") or ()),
+            default=entry["default"] if parts[2] == "extension-map" else spec.default,
+        )
     return tuple(sorted(specs.values(), key=lambda item: (item.group, item.key)))
 
 
@@ -496,30 +644,15 @@ def apply_config_editor_drafts(
 def apply_config_path_drafts(
     data: dict,
     *,
-    overrides: dict[tuple[str, ...], object] | None = None,
-    removals: set[tuple[str, ...]] | None = None,
+    overrides: dict[ConfigPath, object] | None = None,
+    removals: set[ConfigPath] | None = None,
 ) -> dict:
     """Apply edits to documented concrete JSON paths without losing peers."""
     result = copy.deepcopy(data) if isinstance(data, dict) else {}
     for path in removals or ():
-        node = result
-        for part in path[:-1]:
-            node = node.get(part) if isinstance(node, dict) else None
-        if isinstance(node, dict):
-            node.pop(path[-1], None)
+        result = edit_config_path(result, path, remove=True)
     for path, value in (overrides or {}).items():
-        if not path or any(not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", part) for part in path):
-            raise ValueError("Choose a concrete documented JSON path")
-        node = result
-        for part in path[:-1]:
-            current = node.get(part)
-            if current is None:
-                current = {}
-                node[part] = current
-            if not isinstance(current, dict):
-                raise ValueError(f"Cannot edit nested option under non-object {part}")
-            node = current
-        node[path[-1]] = copy.deepcopy(value)
+        result = edit_config_path(result, path, value)
     return result
 
 
@@ -652,14 +785,14 @@ def parse_typed_config_value(text: str, value_type: str) -> object:
             raise ValueError("Enter a valid integer") from exc
     if kind == "number":
         try:
-            return float(value.strip())
+            return validate_finite_numbers(float(value.strip()))
         except ValueError as exc:
             raise ValueError("Enter a valid number") from exc
     if kind == "null":
         return None
     if kind == "json":
         try:
-            return json.loads(value)
+            return validate_finite_numbers(json.loads(value))
         except (TypeError, ValueError) as exc:
             raise ValueError("Enter valid JSON for a list or object") from exc
     raise ValueError(f"Unsupported value type: {value_type}")
@@ -679,9 +812,10 @@ def build_composer_argv(
     """
 
     parts = ["gallery-dl"]
-    config_exists = bool(config_path and Path(config_path).expanduser().is_file())
+    active_config = safe_expand_path(config_path) if config_path else None
+    config_exists = bool(active_config and active_config.is_file())
     if state.use_active_config and config_exists:
-        parts.extend(["--config", str(config_path)])
+        parts.extend(["--config", str(active_config)])
     elif not state.use_active_config:
         parts.append("--config-ignore")
 
@@ -701,6 +835,8 @@ def build_composer_argv(
             if state.cookies_profile:
                 browser_spec += ":" + state.cookies_profile
             parts.extend(["--cookies-from-browser", browser_spec])
+        if (state.cookies_file or state.cookies_browser != "none") and not state.cookies_update:
+            parts.extend(["-o", "cookies-update=false"])
         if state.archive_enabled:
             _add_value(parts, "--download-archive", state.archive_path)
         if state.retries > 0:
@@ -834,8 +970,7 @@ def build_composer_config(
     auth_options: dict[str, object] = {}
     if state.cookies_file:
         auth_options["cookies"] = state.cookies_file
-        if state.cookies_update:
-            auth_options["cookies-update"] = True
+        auth_options["cookies-update"] = state.cookies_update
     elif state.cookies_browser and state.cookies_browser != "none":
         browser_source: list[object | None] = [state.cookies_browser]
         if state.cookies_profile or state.cookies_domain:
@@ -843,6 +978,7 @@ def build_composer_config(
         if state.cookies_domain:
             browser_source.extend([None, None, state.cookies_domain])
         auth_options["cookies"] = browser_source
+        auth_options["cookies-update"] = state.cookies_update
     if state.username:
         auth_options["username"] = state.username
     if state.secret_key and state.secret_value:
@@ -890,14 +1026,23 @@ def build_composer_config(
         extractor["path-replace"] = "_"
         extractor["path-strip"] = "windows"
     existing_pp = existing_extractor.get("postprocessors", []) if isinstance(existing_extractor, dict) else []
-    # Metadata/zip entries are represented by Composer checkboxes.  Remove the
-    # old managed entries first so unchecking them actually removes them, while
-    # preserving unrelated user postprocessors such as exec/classify.
-    postprocessors = [
-        copy.deepcopy(item)
-        for item in existing_pp
-        if not (isinstance(item, dict) and item.get("name") in {"metadata", "zip"})
-    ] if isinstance(existing_pp, list) else []
+    # Keep enabled entries intact: recreating them from checkbox defaults
+    # discards custom filenames, events, compression, and other saved options.
+    # Only remove entries whose corresponding checkbox has been cleared.
+    postprocessors = []
+    for item in existing_pp if isinstance(existing_pp, list) else []:
+        if isinstance(item, dict):
+            if item.get("name") == "metadata":
+                enabled = state.info_json if item.get("filename") == "info.json" else state.metadata_json
+                if not enabled:
+                    continue
+            elif item.get("name") == "zip":
+                if state.archive_format not in {"zip", "cbz"}:
+                    continue
+                item = copy.deepcopy(item)
+                if state.archive_format == "cbz" or item.get("extension") == "cbz":
+                    item["extension"] = state.archive_format
+        postprocessors.append(copy.deepcopy(item))
     if state.metadata_json and not any(
         isinstance(item, dict) and item.get("name") == "metadata" and item.get("filename") != "info.json"
         for item in postprocessors
@@ -996,19 +1141,23 @@ def config_defaults(data: dict) -> dict[str, object]:
     }
 
 
-def _read_json_config(path: str | None) -> tuple[dict, str | None]:
+def _read_json_config(path: str | None, *, required: bool = False) -> tuple[dict, str | None]:
     if not path:
         return {}, None
-    config = Path(path).expanduser()
+    config = safe_expand_path(path)
     if not config.exists():
-        return {}, None
+        return {}, "The selected config file no longer exists." if required else None
     if not config.is_file():
         return {}, "Config path is not a file."
     try:
-        data = json.loads(read_text_safely(config))
+        from .config_helper import parse_config_json
+        data = parse_config_json(read_text_safely(config))
+        validate_finite_numbers(data)
         if not isinstance(data, dict):
             return {}, "Config root must be a JSON object."
         return data, None
+    except json.JSONDecodeError as exc:
+        return {}, f"Invalid JSON at line {exc.lineno}, column {exc.colno}: {exc.msg}. Check commas between items and double quotes around names."
     except Exception as exc:
         return {}, str(exc)
 
@@ -1016,17 +1165,23 @@ def _read_json_config(path: str | None) -> tuple[dict, str | None]:
 class ComposerFlowchart(QWidget):
     """Compact, theme-aware overview of the Composer workflow."""
 
-    def __init__(self, *, indonesian: bool, parent: QWidget | None = None) -> None:
+    def __init__(self, *, indonesian: bool, config_mode: bool = False, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.indonesian = indonesian
-        self.setMinimumHeight(310)
+        self.config_mode = config_mode
+        self.setMinimumHeight(150 if config_mode else 310)
         self.setAccessibleName(
-            "Alur penggunaan Download Composer" if indonesian else "Download Composer usage flow"
+            ("Alur pembuatan config" if indonesian else "Config maker usage flow") if config_mode else
+            ("Alur penggunaan Download Composer" if indonesian else "Download Composer usage flow")
         )
         self.setToolTip(
+            ("Pilih folder, atur situs, periksa perubahan, lalu simpan." if indonesian else
+             "Choose a folder, set up websites, review changes, then save.") if config_mode else
+            (
             "Ikuti alur dari kiri ke kanan. Pilihan scope bercabang lalu bergabung kembali di Preview."
             if indonesian else
             "Follow the flow from left to right. The scope choice branches and joins again at Preview."
+            )
         )
 
     @staticmethod
@@ -1062,6 +1217,8 @@ class ComposerFlowchart(QWidget):
         painter.drawRoundedRect(rect, 10, 10)
         painter.setPen(text)
         title_font = painter.font()
+        if title_font.pointSizeF() <= 0:
+            title_font.setPointSizeF(10.0)
         title_font.setBold(True)
         painter.setFont(title_font)
         painter.drawText(rect.adjusted(10, 7, -10, -27), Qt.AlignLeft | Qt.AlignTop, f"{step}  {title}")
@@ -1100,6 +1257,21 @@ class ComposerFlowchart(QWidget):
         node_h = 68.0
         gap = (width - node_w * 4) / 3.0
         xs = [x0 + index * (node_w + gap) for index in range(4)]
+        if self.config_mode:
+            labels = (
+                [("Folder unduhan", "Tempat menyimpan file."), ("Pengaturan situs", "Pilih situs; ubah yang perlu."),
+                 ("Periksa perubahan", "Lihat hasil sebelum simpan."), ("Simpan config", "Siap dipakai untuk unduhan.")]
+                if self.indonesian else
+                [("Download folder", "Where files will be saved."), ("Website settings", "Choose a site; change what you need."),
+                 ("Review changes", "Check the result before saving."), ("Save config", "Ready for your next downloads.")]
+            )
+            for index, (title, detail) in enumerate(labels):
+                rect = QRectF(xs[index], top_y, node_w, 90)
+                if index < 3:
+                    self._arrow(painter, rect.topRight() + QPointF(0, 45), QPointF(xs[index + 1], top_y + 45), accent)
+                self._node(painter, rect, str(index + 1), title, detail,
+                           fill=neutral, border=border, text=text, muted=muted)
+            return
         url_box = QRectF(xs[0], top_y, node_w, node_h)
         scope_box = QRectF(xs[1], top_y, node_w, node_h)
         preview_box = QRectF(xs[2], top_y + 94, node_w, node_h)
@@ -1168,10 +1340,10 @@ class ComposerMixin:
     def open_config_guide_dialog(self) -> None:
         self.open_download_composer()
 
-    def open_config_builder(self) -> None:
-        self.open_download_composer(config_only=True)
+    def open_config_builder(self, preferred_site: str = "") -> None:
+        self.open_download_composer(config_only=True, preferred_site=preferred_site if isinstance(preferred_site, str) else "")
 
-    def open_download_composer(self, *, config_only: bool = False) -> None:  # noqa: C901 - UI composition is intentionally local
+    def open_download_composer(self, *, config_only: bool = False, preferred_site: str = "") -> None:  # noqa: C901 - UI composition is intentionally local
         if self.active_workers > 0:
             self.show_compact_message(
                 "Download Composer",
@@ -1185,7 +1357,8 @@ class ComposerMixin:
             return id_text if ind else en
 
         dlg = QDialog(self)
-        dlg.setWindowTitle(tr("Config Builder", "Pembuat Config") if config_only else tr("Download Composer", "Perancang Download"))
+        dlg.setObjectName("configBuilderDialog" if config_only else "downloadComposerDialog")
+        dlg.setWindowTitle(tr("Config Builder", "Pembuat Config") if config_only else tr("Add downloads", "Tambah Unduhan"))
         if config_only:
             dlg.resize(900, 620)
             dlg.setMinimumSize(760, 520)
@@ -1197,7 +1370,7 @@ class ComposerMixin:
         root.setSpacing(9)
 
         title_row = QHBoxLayout()
-        title = QLabel(tr("Config Builder", "Pembuat Config") if config_only else tr("Download Composer", "Perancang Download"))
+        title = QLabel(tr("Config Builder", "Pembuat Config") if config_only else tr("Add downloads", "Tambah Unduhan"))
         title.setObjectName("title")
         title_row.addWidget(title)
         title_row.addStretch(1)
@@ -1206,24 +1379,29 @@ class ComposerMixin:
         title_row.addWidget(scope_badge)
         root.addLayout(title_row)
         intro = QLabel(tr(
-            "Edit reusable gallery-dl defaults and site settings, then save the JSON config.",
-            "Ubah default gallery-dl dan pengaturan situs, lalu simpan config JSON.",
+            "Choose a download folder and website settings, then save your config file. The app creates it for you; you do not need to write JSON.",
+            "Pilih folder unduhan dan pengaturan situs, lalu simpan file config. Aplikasi membuatnya untuk Anda; tidak perlu menulis JSON.",
         ) if config_only else tr(
-            "One workspace for a download job, reusable defaults, and site presets. Command options override saved defaults only when you choose Job override.",
-            "Satu tempat untuk job download, default yang dapat dipakai ulang, dan preset situs. Opsi command hanya menimpa default saat memilih Override job.",
+            "1. Paste or build links  2. Choose options for these jobs  3. Add to queue. Saved website settings are edited through Config.",
+            "1. Tempel atau buat tautan  2. Pilih opsi untuk job ini  3. Tambah ke antrean. Pengaturan situs tersimpan diedit melalui Config.",
         ))
         intro.setObjectName("subtle")
         intro.setWordWrap(True)
         root.addWidget(intro)
         active_path = None
+        config_start_button = None
         if config_only:
-            active_path = QLabel(tr("Config path: ", "Path config: ") + str(self.config_path or detect_config_path() or APP_DIR / "config.json"))
+            active_path = QLabel(tr("Config file: ", "File config: ") + str(self.config_path or detect_config_path() or APP_DIR / "config.json"))
             active_path.setObjectName("subtle")
             active_path.setWordWrap(True)
             active_path.setTextInteractionFlags(Qt.TextSelectableByMouse)
             root.addWidget(active_path)
+            config_start_button = QPushButton(tr("Choose a website…", "Pilih situs…"))
+            config_start_button.setObjectName("configWebsiteSettingsButton")
+            root.addWidget(config_start_button)
 
         tabs = QTabWidget()
+        tabs.setObjectName("composerTabs")
         root.addWidget(tabs, 1)
         definitions = self.gallery_dl_site_preset_definitions()
         definition_names = {
@@ -1233,13 +1411,7 @@ class ComposerMixin:
         }
         runtime_categories: set[str] = set()
         try:
-            from gallery_dl import extractor
-
-            runtime_categories.update(
-                str(item.category).strip().lower()
-                for item in extractor.extractors()
-                if str(getattr(item, "category", "")).strip()
-            )
+            runtime_categories.update(installed_site_catalog())
         except Exception:
             pass
         # Coomer changes category dynamically after URL matching, so it is not
@@ -1435,82 +1607,33 @@ class ComposerMixin:
         job_l.addWidget(recipe, 0, 1)
         scope = QComboBox()
         scope.addItem(tr("Job override", "Override job"), "job")
-        scope.addItem(tr("Saved defaults", "Default tersimpan"), "config")
+        if config_only:
+            scope.addItem(tr("Saved defaults", "Default tersimpan"), "config")
         scope.setToolTip(tr(
             "Job override writes shared values into this command. Saved defaults keeps them in the config instead.",
             "Override job menulis nilai bersama ke command ini. Default tersimpan menyimpannya di config.",
         ))
         job_l.addWidget(scope, 0, 2)
         urls = QPlainTextEdit()
+        urls.setObjectName("composerPreparedLinks")
         urls.setPlaceholderText(tr("One URL per line", "Satu URL per baris"))
         urls.setMinimumHeight(88)
+        urls.setMaximumHeight(105)
         urls.setToolTip(tr(
             "Paste one gallery-dl-supported URL per line. Every line becomes a separate queue job.",
             "Tempel satu URL yang didukung gallery-dl per baris. Setiap baris menjadi satu job antrean.",
         ))
-        job_l.addWidget(QLabel("URL"), 1, 0)
-        job_l.addWidget(urls, 1, 1, 1, 2)
-        guided_url_row = QHBoxLayout()
-        guided_site = QComboBox()
-        guided_site.setObjectName("guidedUrlSite")
-        guided_site.addItems(sorted(URL_RECIPE_MODES))
-        guided_site.setCurrentText("hypnohub")
-        guided_site.setMinimumWidth(126)
-        guided_mode = QComboBox()
-        guided_mode.setObjectName("guidedUrlMode")
-        guided_mode.setMinimumWidth(98)
-        guided_target = QLineEdit()
-        guided_target.setObjectName("guidedUrlTarget")
-        guided_add = QPushButton(tr("Add URL", "Tambah URL"))
-        guided_add.setObjectName("guidedUrlAdd")
-        guided_url_row.addWidget(guided_site)
-        guided_url_row.addWidget(guided_mode)
-        guided_url_row.addWidget(guided_target, 1)
-        guided_url_row.addWidget(guided_add)
-        job_l.addWidget(QLabel(tr("URL guide", "Panduan URL")), 2, 0)
-        job_l.addLayout(guided_url_row, 2, 1, 1, 2)
-        guided_note = QLabel()
-        guided_note.setObjectName("guidedUrlNote")
-        guided_note.setWordWrap(True)
-        job_l.addWidget(guided_note, 3, 1, 1, 2)
+        job_l.addWidget(QLabel(tr("Prepared links", "Tautan yang disiapkan")), 3, 0)
+        job_l.addWidget(urls, 3, 1, 1, 2)
+        def append_built_links(links: list[str]) -> int:
+            existing = [line.strip() for line in urls.toPlainText().splitlines() if line.strip()]
+            additions = [url for url in links if url not in existing]
+            if additions:
+                urls.setPlainText("\n".join(existing + additions))
+            return len(additions)
 
-        def update_guided_modes(*_args) -> None:
-            previous = guided_mode.currentText()
-            guided_mode.clear()
-            guided_mode.addItems(URL_RECIPE_MODES[guided_site.currentText()])
-            if previous in URL_RECIPE_MODES[guided_site.currentText()]:
-                guided_mode.setCurrentText(previous)
-            update_guided_hint()
-
-        def update_guided_hint(*_args) -> None:
-            site, mode = guided_site.currentText(), guided_mode.currentText()
-            hint = url_recipe_hint(site, mode)
-            guided_target.setPlaceholderText(hint)
-            guided_note.setText(tr(
-                f"Enter {hint}. The generated URL is checked against the installed gallery-dl extractor before it is added.",
-                f"Masukkan {hint}. URL hasilnya diperiksa dengan extractor gallery-dl terpasang sebelum ditambahkan.",
-            ))
-
-        def add_guided_url() -> None:
-            try:
-                built_url, subcategory = build_site_url(
-                    guided_site.currentText(), guided_mode.currentText(), guided_target.text(),
-                )
-            except ValueError as exc:
-                guided_note.setText(str(exc))
-                return
-            existing = urls.toPlainText().strip()
-            if built_url not in existing.splitlines():
-                urls.setPlainText(existing + "\n" + built_url if existing else built_url)
-            guided_note.setText(tr(
-                f"Added {built_url} · extractor {guided_site.currentText()}/{subcategory}",
-                f"Ditambahkan {built_url} · extractor {guided_site.currentText()}/{subcategory}",
-            ))
-
-        guided_site.currentTextChanged.connect(update_guided_modes)
-        guided_mode.currentTextChanged.connect(update_guided_hint)
-        guided_add.clicked.connect(add_guided_url)
-        update_guided_modes()
+        guided_builder = LinkBuilder(append_built_links, indonesian=ind)
+        job_l.addWidget(guided_builder, 1, 0, 2, 3)
         config_path_label = QLabel(str(self.config_path or detect_config_path() or ""))
         config_path_label.setObjectName("subtle")
         config_path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -1538,13 +1661,16 @@ class ComposerMixin:
             "Put files directly in the selected folder and ignore the Subfolders pattern.",
             "Letakkan file langsung di folder terpilih dan abaikan pola Subfolder.",
         ))
-        directory = QLineEdit("{category}; {subcategory}; {user[id]}")
-        directory.setPlaceholderText(tr("Separate folder levels with ;", "Pisahkan tingkat folder dengan ;"))
+        directory = QLineEdit()
+        directory.setObjectName("composerSubfolders")
+        directory.setPlaceholderText(tr("Leave blank to use website/config folders; separate overrides with ;", "Kosongkan untuk folder situs/config; pisahkan override dengan ;"))
         directory.setToolTip(tr(
             "Folder levels below Download folder. Separate each level with a semicolon. Available keywords vary by extractor; inspect them with Mode: List keywords.",
             "Tingkat folder di bawah Folder download. Pisahkan setiap tingkat dengan titik koma. Keyword berbeda per extractor; periksa melalui Mode: Lihat keyword.",
         ))
-        filename = QLineEdit("{id}_{num}.{extension}")
+        filename = QLineEdit()
+        filename.setObjectName("composerFilename")
+        filename.setPlaceholderText(tr("Leave blank to use website/config filenames", "Kosongkan untuk nama file situs/config"))
         filename.setToolTip(tr(
             "gallery-dl filename format. Keep {extension}; use Preview or List keywords before using site-specific fields.",
             "Format nama file gallery-dl. Pertahankan {extension}; gunakan Pratinjau atau Lihat keyword sebelum memakai field khusus situs.",
@@ -2047,11 +2173,11 @@ class ComposerMixin:
         site_search.setToolTip(tr("Filter the preset list by site name or extractor category.", "Saring daftar preset berdasarkan nama situs atau category extractor."))
         select_common = QPushButton(tr("Common", "Umum"))
         select_none = QPushButton(tr("Clear", "Bersihkan"))
-        site_config_button = QPushButton(tr("Site Config Studio…", "Studio Config Situs…"))
+        site_config_button = QPushButton(tr("Website Settings…", "Pengaturan Situs…"))
         site_config_button.setObjectName("siteConfigStudioButton")
         site_config_button.setToolTip(tr(
-            "Edit per-site archive databases, Reddit OAuth app settings, Pixiv options, and typed advanced options.",
-            "Atur database archive per situs, aplikasi OAuth Reddit, opsi Pixiv, dan opsi lanjutan bertipe.",
+            "Choose a website and change its download settings with simple controls.",
+            "Pilih situs dan ubah pengaturan unduhannya dengan kontrol yang mudah.",
         ))
         site_tools.addWidget(site_search, 1)
         site_tools.addWidget(select_common)
@@ -2098,6 +2224,29 @@ class ComposerMixin:
         config_preview.setLineWrapMode(QPlainTextEdit.NoWrap)
         preview_tabs.addTab(command_preview, tr("Final command", "Command final"))
         preview_tabs.addTab(config_preview, tr("Merged config", "Config gabungan"))
+        config_summary = QPlainTextEdit(preview_page)
+        config_summary.setObjectName("configReviewSummary")
+        config_summary.setReadOnly(True)
+        if config_only:
+            preview_tabs.insertTab(1, config_summary, tr("Changes explained", "Penjelasan perubahan"))
+        else:
+            config_summary.hide()
+        helper_page = QWidget()
+        helper_layout = QVBoxLayout(helper_page)
+        helper_note = QLabel(tr(
+            "Check this draft for conflicting defaults, undefined actions, invalid filters and missing animation tools. Checks do not change your settings. Test website access through the Download Composer after saving.",
+            "Periksa draft untuk default yang bertabrakan, tindakan belum terdefinisi, filter salah dan tool animasi yang belum ada. Pemeriksaan tidak mengubah pengaturan. Uji akses situs melalui Download Composer setelah menyimpan.",
+        ))
+        helper_note.setWordWrap(True)
+        helper_layout.addWidget(helper_note)
+        helper_result = QPlainTextEdit()
+        helper_result.setObjectName("configHelperResult")
+        helper_result.setReadOnly(True)
+        helper_layout.addWidget(helper_result, 1)
+        helper_check = QPushButton(tr("Check current config draft", "Periksa draft config saat ini"))
+        helper_check.setObjectName("configHelperCheck")
+        helper_layout.addWidget(helper_check)
+        preview_tabs.addTab(helper_page, tr("Config helper", "Bantuan config"))
         preview_l.addWidget(preview_tabs, 1)
         warnings = QLabel()
         warnings.setObjectName("subtle")
@@ -2105,7 +2254,126 @@ class ComposerMixin:
         preview_l.addWidget(warnings)
         tabs.addTab(preview_page, tr("Preview", "Pratinjau"))
 
-        existing_config, config_error = _read_json_config(self.config_path)
+        import_config_button = None
+        load_example_button = None
+        if config_only:
+            start_scroll = QScrollArea()
+            start_scroll.setWidgetResizable(True)
+            start_scroll.setFrameShape(QFrame.NoFrame)
+            start_page = QWidget()
+            start_l = QVBoxLayout(start_page)
+            start_l.addWidget(ComposerFlowchart(indonesian=ind, config_mode=True))
+            start_note = QLabel(tr(
+                "Start here. Change only what you need; gallery-dl supplies defaults for the rest. Settings apply to every website unless you choose a specific website.",
+                "Mulai di sini. Ubah yang diperlukan; pengaturan lainnya memakai bawaan gallery-dl. Pengaturan berlaku untuk semua situs kecuali Anda memilih situs tertentu.",
+            ))
+            start_note.setWordWrap(True)
+            start_l.addWidget(start_note)
+            import_config_button = QPushButton(tr("Use an existing config as a starting point…", "Gunakan config yang sudah ada sebagai contoh…"))
+            import_config_button.setObjectName("configStarterImport")
+            import_config_button.setToolTip(tr("Replaces the current draft. The selected source file is only read; choose Save As to write a separate copy.", "Mengganti draft saat ini. File sumber hanya dibaca; gunakan Simpan Sebagai untuk menulis salinan terpisah."))
+            start_l.addWidget(import_config_button)
+            example_row = QHBoxLayout()
+            example_search = QLineEdit()
+            example_search.setObjectName("configStarterExampleSearch")
+            example_search.setPlaceholderText(tr("Find examples by website or purpose…", "Cari contoh berdasarkan situs atau tujuan…"))
+            start_l.addWidget(example_search)
+            config_example_picker = QComboBox()
+            config_example_picker.setObjectName("configStarterExample")
+            for example in EXAMPLES:
+                config_example_picker.addItem(tr(*example.title), example.key)
+            load_example_button = QPushButton(tr("Use this example", "Pakai contoh ini"))
+            load_example_button.setObjectName("configStarterLoadExample")
+            load_example_button.setToolTip(tr("Replaces the draft with this example. Choose your folder and login, review changes, then Save As.", "Mengganti draft dengan contoh ini. Pilih folder dan login, periksa perubahan, lalu Simpan Sebagai."))
+            example_row.addWidget(config_example_picker, 1)
+            example_row.addWidget(load_example_button)
+            start_l.addLayout(example_row)
+            example_note = QLabel()
+            example_note.setObjectName("configStarterExampleDescription")
+            example_note.setTextFormat(Qt.PlainText)
+            example_note.setWordWrap(True)
+            start_l.addWidget(example_note)
+            example_source = QLabel()
+            example_source.setObjectName("configStarterExampleSource")
+            example_source.setOpenExternalLinks(True)
+            example_source.setWordWrap(True)
+            start_l.addWidget(example_source)
+
+            def describe_example(*_args) -> None:
+                example = next((item for item in EXAMPLES if item.key == config_example_picker.currentData()), None)
+                load_example_button.setEnabled(example is not None)
+                if example is None:
+                    example_note.setText(tr("No matching examples. Try a website name such as Instagram or a purpose such as JSON.", "Tidak ada contoh yang cocok. Coba nama situs seperti Instagram atau tujuan seperti JSON."))
+                    example_source.clear()
+                    return
+                example_note.setText(tr(*example.description) + tr("\nLoading replaces the draft. Choose your folder, review, then Save As.", "\nMemuat mengganti draft. Pilih folder, periksa, lalu Simpan Sebagai."))
+                example_source.setText(f'<a href="{example.source}">{tr("Read the source example", "Baca sumber contoh")}</a>')
+
+            def filter_examples(query: str) -> None:
+                previous = config_example_picker.currentData()
+                config_example_picker.blockSignals(True)
+                config_example_picker.clear()
+                words = query.lower().split()
+                for example in EXAMPLES:
+                    haystack = " ".join((example.key, *example.title, *example.description)).lower()
+                    if all(word in haystack for word in words):
+                        config_example_picker.addItem(tr(*example.title), example.key)
+                config_example_picker.setCurrentIndex(max(0, config_example_picker.findData(previous)))
+                config_example_picker.blockSignals(False)
+                describe_example()
+
+            config_example_picker.currentIndexChanged.connect(describe_example)
+            example_search.textChanged.connect(filter_examples)
+            describe_example()
+            folder_label = QLabel()
+            folder_label.setWordWrap(True)
+            folder_label.setObjectName("configStarterFolder")
+
+            def show_starter_folder(value: str) -> None:
+                folder_label.setText(tr("Download folder: ", "Folder unduhan: ") + (value or "./gallery-dl/"))
+
+            destination.textChanged.connect(show_starter_folder)
+            show_starter_folder(destination.text())
+            start_l.addWidget(folder_label)
+            choose_folder = QPushButton(tr("1. Choose download folder…", "1. Pilih folder unduhan…"))
+            choose_folder.setObjectName("configStarterChooseFolder")
+            choose_folder.clicked.connect(lambda: browse_folder())
+            start_l.addWidget(choose_folder)
+            root.removeWidget(config_start_button)
+            config_start_button.setText(tr("2. Choose a website…", "2. Pilih situs…"))
+            start_l.addWidget(config_start_button)
+            login_shortcut = QPushButton(tr("Login needed? Set up cookies or an account…", "Perlu login? Atur cookies atau akun…"))
+            login_shortcut.clicked.connect(lambda: tabs.setCurrentWidget(auth_scroll))
+            start_l.addWidget(login_shortcut)
+            remember_downloads = QCheckBox(tr("Skip files already downloaded", "Lewati file yang sudah diunduh"))
+            remember_downloads.setObjectName("configStarterHistory")
+
+            def set_starter_history(checked: bool) -> None:
+                if checked and not archive_path.text().strip():
+                    config_target = safe_expand_path(self.config_path or str(APP_DIR / "config.json"))
+                    archive_path.setText(str(config_target.parent / "download-history.sqlite3"))
+                archive_enabled.setChecked(checked)
+
+            remember_downloads.toggled.connect(set_starter_history)
+            archive_enabled.toggled.connect(remember_downloads.setChecked)
+            start_l.addWidget(remember_downloads)
+            history_help = QLabel(tr(
+                "Uses a download history file. Uncheck this to stop using the shared history; per-website history settings still apply.",
+                "Memakai file riwayat unduhan. Hapus centang untuk menghentikan riwayat bersama; pengaturan riwayat per situs tetap berlaku.",
+            ))
+            history_help.setWordWrap(True)
+            start_l.addWidget(history_help)
+            review_shortcut = QPushButton(tr("3. Review config before saving", "3. Periksa config sebelum menyimpan"))
+            review_shortcut.setObjectName("configStarterReview")
+            review_shortcut.clicked.connect(lambda: tabs.setCurrentWidget(preview_page))
+            start_l.addWidget(review_shortcut)
+            start_l.addStretch(1)
+            start_scroll.setWidget(start_page)
+            tabs.insertTab(0, start_scroll, tr("Start here", "Mulai di sini"))
+
+        existing_path = self.config_path or detect_config_path()
+        existing_config, config_error = _read_json_config(existing_path)
+        preserve_source = bool(existing_path) and config_error is None
         # Only draft values created in Site Config Studio live here. They are
         # merged recursively into the existing config and are not persisted
         # until the user explicitly saves from the main Composer dialog.
@@ -2113,17 +2381,22 @@ class ComposerMixin:
         site_overrides: dict[str, dict[str, object]] = {}
         general_removals: set[str] = set()
         site_removals: dict[str, set[str]] = {}
-        path_overrides: dict[tuple[str, ...], object] = {}
-        path_removals: set[tuple[str, ...]] = set()
+        path_overrides: dict[ConfigPath, object] = {}
+        path_removals: set[ConfigPath] = set()
+        loaded_state: ComposerState | None = None
 
         def apply_loaded_defaults() -> None:
             values = config_defaults(existing_config)
+            if config_only and preserve_source:
+                destination.clear()
+                directory.clear()
+                filename.clear()
             if values.get("destination"):
                 destination.setText(str(values["destination"]))
-            if values.get("directory"):
+            if config_only and values.get("directory"):
                 directory.setText("; ".join(values["directory"]))
-            exact_destination.setChecked(bool(values.get("exact_destination", False)))
-            if values.get("filename"):
+            exact_destination.setChecked(config_only and bool(values.get("exact_destination", False)))
+            if config_only and values.get("filename"):
                 filename.setText(str(values["filename"]))
             browser_value = str(values.get("cookies_browser", "none"))
             if cookies_browser.findText(browser_value) >= 0:
@@ -2257,6 +2530,9 @@ class ComposerMixin:
                 site_blocks=selected_site_blocks(state),
                 existing=existing_config,
             )
+            if preserve_source and loaded_state is not None:
+                baseline = build_composer_config(loaded_state, existing=existing_config)
+                data = apply_config_delta(existing_config, baseline, data)
             data = apply_config_editor_drafts(
                 data,
                 general_overrides=general_overrides,
@@ -2279,6 +2555,34 @@ class ComposerMixin:
                 lines.append(" ".join(quote_arg_for_preview(part) for part in argv))
             return lines
 
+        def describe_changes(data: dict) -> str:
+            safe = redact_auth_config(data)
+            changes = config_changes(existing_config, data)
+            if not changes:
+                return tr("No unsaved changes. Your saved config is ready to use.", "Tidak ada perubahan yang belum tersimpan. Config siap dipakai.")
+            lines = [tr(f"{len(changes)} setting(s) will change when you save:", f"{len(changes)} pengaturan akan berubah saat disimpan:"), ""]
+            for path, removed in changes:
+                names = _FRIENDLY_OPTION_NAMES.get(str(path[-1]))
+                name = tr(*names) if names else str(path[-1]).replace("-", " ").capitalize()
+                section = ".".join(str(part) for part in path[:-1])
+                if section == "extractor":
+                    section = tr("All websites", "Semua situs")
+                elif section.startswith("extractor."):
+                    section = section.removeprefix("extractor.")
+                if removed:
+                    value = tr("Use default", "Pakai bawaan")
+                else:
+                    value, _ = config_path_value(safe, path)
+                    if isinstance(value, bool):
+                        value = tr("Enabled", "Aktif") if value else tr("Disabled", "Nonaktif")
+                    elif isinstance(value, (dict, list)):
+                        value = json.dumps(value, ensure_ascii=False)
+                    value = str(value)
+                    if len(value) > 180:
+                        value = value[:177] + "…"
+                lines.append(f"• {section} → {name}: {value}")
+            return "\n".join(lines)
+
         def refresh_preview(*_args) -> None:
             state = current_state()
             command_preview.setPlainText("\n".join(command_lines(redact=True)))
@@ -2287,6 +2591,7 @@ class ComposerMixin:
                 extra_keys=(state.secret_key, state.extra_auth_key),
             )
             config_preview.setPlainText(json.dumps(safe_config, indent=2, ensure_ascii=False))
+            config_summary.setPlainText(describe_changes(proposed_config()))
             is_config = state.apply_to_config
             scope_badge.setText(tr("SAVED DEFAULTS", "DEFAULT TERSIMPAN") if is_config else tr("JOB OVERRIDE", "OVERRIDE JOB"))
             issues: list[str] = []
@@ -2309,30 +2614,52 @@ class ComposerMixin:
                 issues.append(tr("Archive is enabled but its path is empty.", "Archive aktif tetapi path-nya kosong."))
             if state.exact_destination and state.directory:
                 issues.append(tr("Exact folder is enabled, so the subfolder pattern is ignored.", "Folder persis aktif, sehingga pola subfolder diabaikan."))
-            if is_config and not self.config_path:
-                issues.append(tr("Choose a config path before relying on saved defaults.", "Pilih path config sebelum memakai default tersimpan."))
             if config_error:
                 issues.append(tr("The active config could not be merged: ", "Config aktif tidak dapat digabung: ") + config_error)
             warnings.setText("\n".join("! " + issue for issue in issues))
 
-        def open_site_config_studio() -> None:  # noqa: C901 - guided tabbed editor
+        def check_config_draft(*_args) -> None:
+            from .config_helper import config_helper_text
+            from .core import dependency_status
+            helper_result.setPlainText(config_helper_text(proposed_config(), indonesian=ind, dependencies=dependency_status()))
+
+        helper_check.clicked.connect(check_config_draft)
+        preview_tabs.currentChanged.connect(lambda _index: check_config_draft() if preview_tabs.currentWidget() == helper_page else None)
+
+        def open_site_config_studio(preferred_site: str = "") -> None:  # noqa: C901 - guided tabbed editor
             studio = QDialog(dlg)
             studio.setObjectName("siteConfigStudio")
-            studio.setWindowTitle(tr("Site Config Studio", "Studio Config Situs"))
+            studio.setWindowTitle(tr("Website Settings", "Pengaturan Situs"))
             studio.resize(1040, 760)
             studio.setMinimumSize(860, 640)
             studio_l = QVBoxLayout(studio)
             studio_intro = QLabel(tr(
-                "Build extractor-specific JSON without typing braces or option names. Changes remain a draft until you use Save Defaults in the Composer.",
-                "Buat JSON khusus extractor tanpa mengetik kurung atau nama opsi. Perubahan tetap berupa draft sampai Anda menekan Simpan Default di Composer.",
+                "Choose a website and decide how its downloads should work. Save config creates or updates your config file with settings for every website you changed.",
+                "Pilih situs dan atur cara unduhannya. Simpan config membuat atau memperbarui file config dengan pengaturan semua situs yang Anda ubah.",
             ))
             studio_intro.setWordWrap(True)
             studio_intro.setObjectName("subtle")
             studio_l.addWidget(studio_intro)
+            studio_guide = QLabel(tr(
+                "1. Choose a website   2. Change only what you need   3. Save config",
+                "1. Pilih situs   2. Ubah yang diperlukan   3. Simpan config",
+            ))
+            studio_guide.setObjectName("siteConfigGuide")
+            studio_guide.setWordWrap(True)
+            studio_l.addWidget(studio_guide)
+            studio_path = QLabel(tr("Config file: ", "File config: ") + str(
+                self.config_path or detect_config_path() or APP_DIR / "config.json"
+            ))
+            studio_path.setObjectName("siteConfigFilePath")
+            studio_path.setWordWrap(True)
+            studio_path.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            studio_l.addWidget(studio_path)
 
             studio_tabs = QTabWidget()
             studio_tabs.setObjectName("siteConfigTabs")
             studio_l.addWidget(studio_tabs, 1)
+            advanced_tabs = QTabWidget()
+            advanced_tabs.setObjectName("siteConfigAdvancedTabs")
             existing_extractor = (
                 existing_config.get("extractor", {})
                 if isinstance(existing_config, dict)
@@ -2353,18 +2680,24 @@ class ComposerMixin:
                 | {"kemono", "coomer", "reddit", "pixiv"}
                 - {""}
             )
+            selected_studio_site = preferred_site if preferred_site in site_names else next(
+                (key for key, checkbox in site_checks.items() if checkbox.isChecked() and key in site_names),
+                "instagram" if "instagram" in site_names else site_names[0],
+            )
 
             def site_picker(object_name: str, default: str) -> QComboBox:
                 picker = QComboBox()
                 picker.setObjectName(object_name)
-                picker.setEditable(False)
+                picker.setEditable(True)
                 picker.setInsertPolicy(QComboBox.NoInsert)
                 picker.setMaxVisibleItems(24)
                 picker.addItems(site_names)
-                picker.setCurrentText(default)
+                picker.setCurrentText(default if default in site_names else site_names[0])
+                picker.lineEdit().setPlaceholderText(tr("Type to find a site", "Ketik untuk mencari situs"))
                 if picker.completer() is not None:
                     picker.completer().setCaseSensitivity(Qt.CaseInsensitive)
                     picker.completer().setFilterMode(Qt.MatchContains)
+                    picker.completer().setCompletionMode(QCompleter.PopupCompletion)
                 return picker
 
             def normalized_site(picker: QComboBox) -> str:
@@ -2377,7 +2710,18 @@ class ComposerMixin:
                 return category
 
             def merge_override(category: str, block: dict[str, object]) -> None:
+                for key in block:
+                    prefix = ("extractor", *([category] if category else []), key)
+                    for path in list(path_overrides):
+                        if path[:len(prefix)] == prefix:
+                            path_overrides.pop(path)
+                    path_removals.difference_update(path for path in list(path_removals) if path[:len(prefix)] == prefix)
                 site_overrides[category] = _merge_dict(site_overrides.get(category, {}), block)
+                # Structured editors show the whole mapping: removed rows must
+                # disappear, rather than return through the recursive merge.
+                for key, value in block.items():
+                    if isinstance(value, dict):
+                        path_overrides[("extractor", *([category] if category else []), key)] = copy.deepcopy(value)
                 removed = site_removals.get(category)
                 if removed:
                     removed.difference_update(block)
@@ -2387,16 +2731,79 @@ class ComposerMixin:
                 refresh_preview()
                 update_studio_preview()
 
+            # One generated options page covers every installed extractor.
+            site_options_page = QWidget()
+            site_options_l = QVBoxLayout(site_options_page)
+            site_options_l.setContentsMargins(10, 10, 10, 10)
+            site_options_intro = QLabel(tr(
+                "These settings affect only the website you choose. Start with the common controls below; search or show all settings when you need more.",
+                "Pengaturan ini hanya memengaruhi situs yang Anda pilih. Mulai dari kontrol umum di bawah; cari atau tampilkan semua pengaturan bila perlu.",
+            ))
+            site_options_intro.setWordWrap(True)
+            site_options_l.addWidget(site_options_intro)
+            site_options_site = site_picker("siteOptionsSiteCombo", selected_studio_site)
+            site_options_search = QLineEdit()
+            site_options_search.setObjectName("siteOptionsSearch")
+            site_options_search.setPlaceholderText(tr(
+                "Find a setting, e.g. comments or cookies", "Cari pengaturan, mis. komentar atau cookies",
+            ))
+            site_options_picker_row = QHBoxLayout()
+            site_options_picker_row.addWidget(QLabel(tr("Website", "Situs")))
+            site_options_picker_row.addWidget(site_options_site, 1)
+            site_options_picker_row.addWidget(site_options_search, 1)
+            site_options_l.addLayout(site_options_picker_row)
+            site_options_goal = QComboBox()
+            site_options_goal.setObjectName("siteOptionsGoal")
+            for label, key in (
+                (tr("Start with the essentials", "Mulai dari pengaturan penting"), "starter"),
+                (tr("Choose what to download", "Pilih konten yang diunduh"), "content"),
+                (tr("Choose folders and file names", "Atur folder dan nama file"), "paths"),
+                (tr("Avoid downloading the same items again", "Hindari unduhan berulang"), "history"),
+                (tr("Adjust connection and waiting times", "Atur koneksi dan waktu tunggu"), "network"),
+                (tr("Do something after downloading", "Atur tindakan setelah unduhan"), "after"),
+            ):
+                site_options_goal.addItem(label, key)
+            site_options_l.addWidget(site_options_goal)
+            site_options_show_all = QCheckBox(tr(
+                "Show all settings (advanced)", "Tampilkan semua pengaturan (lanjutan)",
+            ))
+            site_options_show_all.setObjectName("siteOptionsShowAll")
+            site_options_l.addWidget(site_options_show_all)
+            site_options_status = QLabel()
+            site_options_status.setObjectName("siteOptionsStatus")
+            site_options_status.setWordWrap(True)
+            site_options_l.addWidget(site_options_status)
+            site_options_apply = QPushButton(tr("Apply site settings", "Terapkan pengaturan situs"))
+            site_options_apply.setObjectName("applyGeneratedSiteSettings")
+            site_options_l.addWidget(site_options_apply, 0, Qt.AlignLeft)
+            site_options_scroll = QScrollArea()
+            site_options_scroll.setWidgetResizable(True)
+            site_options_scroll.setFrameShape(QFrame.NoFrame)
+            site_options_content = QWidget()
+            site_options_cards = QVBoxLayout(site_options_content)
+            site_options_cards.setContentsMargins(2, 2, 2, 2)
+            site_options_cards.setSpacing(8)
+            site_options_scroll.setWidget(site_options_content)
+            site_options_l.addWidget(site_options_scroll, 1)
+            studio_tabs.addTab(site_options_page, tr("Website Settings", "Pengaturan Situs"))
+
             # Complete general/per-site option editor -------------------------
             all_options_page = QWidget()
             all_options_l = QVBoxLayout(all_options_page)
             all_options_l.setContentsMargins(10, 10, 10, 10)
+            all_options_help = QLabel(tr(
+                f"Choose from {len(site_names)} available extractor categories. Type a site name to search, then pick a result. The table shows common and site-specific options; select a row, enter a value, and click Set value. Use General defaults only when the value should apply to every site.",
+                f"Pilih dari {len(site_names)} kategori extractor yang tersedia. Ketik nama situs untuk mencari, lalu pilih hasilnya. Tabel menampilkan opsi umum dan khusus situs; pilih baris, masukkan nilai, lalu klik Atur nilai. Gunakan Default umum hanya jika nilai harus berlaku untuk semua situs.",
+            ))
+            all_options_help.setObjectName("siteConfigAllSitesHelp")
+            all_options_help.setWordWrap(True)
+            all_options_l.addWidget(all_options_help)
             option_scope_row = QGridLayout()
             config_scope = QComboBox()
             config_scope.setObjectName("configScopeCombo")
-            config_scope.addItem(tr("General defaults — all sites", "Default umum — semua situs"), "general")
             config_scope.addItem(tr("Per-site override", "Override per situs"), "site")
-            config_site = site_picker("configEditorSiteCombo", "pixiv")
+            config_scope.addItem(tr("General defaults — all sites", "Default umum — semua situs"), "general")
+            config_site = site_picker("configEditorSiteCombo", selected_studio_site)
             config_option_search = QLineEdit()
             config_option_search.setObjectName("configOptionSearch")
             config_option_search.setPlaceholderText(tr(
@@ -2405,7 +2812,7 @@ class ComposerMixin:
             ))
             option_scope_row.addWidget(QLabel(tr("Level", "Tingkat")), 0, 0)
             option_scope_row.addWidget(config_scope, 0, 1)
-            option_scope_row.addWidget(QLabel(tr("Site", "Situs")), 0, 2)
+            option_scope_row.addWidget(QLabel(tr("Site / extractor", "Situs / extractor")), 0, 2)
             option_scope_row.addWidget(config_site, 0, 3)
             option_scope_row.addWidget(config_option_search, 1, 0, 1, 4)
             option_scope_row.setColumnStretch(1, 1)
@@ -2490,102 +2897,249 @@ class ComposerMixin:
             inheritance_note.setObjectName("subtle")
             inheritance_note.setWordWrap(True)
             all_options_l.addWidget(inheritance_note)
-            studio_tabs.addTab(all_options_page, tr("All Options", "Semua Opsi"))
+            advanced_tabs.addTab(all_options_page, tr("All Settings", "Semua Pengaturan"))
+            # The full reference above owns the option catalog. Keep the legacy
+            # editor available internally without another visible catalog page.
+            advanced_tabs.setTabVisible(advanced_tabs.indexOf(all_options_page), False)
 
             reference_page = QWidget()
             reference_l = QVBoxLayout(reference_page)
             reference_l.setContentsMargins(10, 10, 10, 10)
             reference_intro = QLabel(tr(
-                "Search the pinned gallery-dl v1.32.12 manual. Select a concrete path to edit its typed value. Postprocessor fields live inside extractor.postprocessors and remain reference-only here.",
-                "Cari manual gallery-dl v1.32.12. Pilih path konkret untuk mengubah nilainya sesuai tipe. Field postprocessor berada di dalam extractor.postprocessors dan hanya sebagai referensi di sini.",
+                f"All {len(documented_config_options())} documented settings from gallery-dl {config_catalog_version()}. Search by name or purpose, select a setting, then choose a value. Leave settings unchanged to use gallery-dl defaults.",
+                f"Seluruh {len(documented_config_options())} pengaturan terdokumentasi gallery-dl {config_catalog_version()}. Cari nama atau kegunaannya, pilih pengaturan, lalu pilih nilainya. Biarkan pengaturan lainnya memakai bawaan gallery-dl.",
             ))
             reference_intro.setWordWrap(True)
             reference_l.addWidget(reference_intro)
+            reference_group = QComboBox()
+            reference_group.setObjectName("configReferenceGroup")
+            for label, prefix in (
+                (tr("All settings", "Semua pengaturan"), ""),
+                (tr("Downloads and website settings", "Unduhan dan pengaturan situs"), "extractor."),
+                (tr("Network and file transfers", "Jaringan dan transfer file"), "downloader."),
+                (tr("Messages and logs", "Pesan dan log"), "output."),
+                (tr("Actions after downloading", "Tindakan setelah mengunduh"), "postprocessor."),
+                (tr("Cache", "Cache"), "cache."),
+                (tr("Templates", "Template"), "jinja."),
+            ):
+                reference_group.addItem(label, prefix)
+            reference_l.addWidget(reference_group)
             reference_search = QLineEdit()
             reference_search.setObjectName("configReferenceSearch")
             reference_search.setPlaceholderText(tr("Search all documented paths", "Cari semua path terdokumentasi"))
             reference_l.addWidget(reference_search)
-            reference_table = QTableWidget(0, 3)
+            reference_table = QTableWidget(0, 2)
             reference_table.setObjectName("configReferenceTable")
-            reference_table.setHorizontalHeaderLabels(["JSON path", tr("Type", "Tipe"), tr("Description", "Keterangan")])
+            reference_table.setHorizontalHeaderLabels([tr("Setting", "Pengaturan"), tr("Section", "Bagian")])
             reference_table.setEditTriggers(QTableWidget.NoEditTriggers)
             reference_table.verticalHeader().setVisible(False)
-            reference_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+            reference_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
             reference_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-            reference_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
             reference_l.addWidget(reference_table, 1)
+            reference_help = QPlainTextEdit()
+            reference_help.setObjectName("configReferenceHelp")
+            reference_help.setReadOnly(True)
+            reference_help.setMaximumHeight(120)
+            reference_l.addWidget(reference_help)
             reference_status = QLabel()
             reference_status.setObjectName("configReferenceStatus")
             reference_status.setWordWrap(True)
             reference_l.addWidget(reference_status)
+            reference_target_row = QHBoxLayout()
+            reference_site = site_picker("configReferenceSite", selected_studio_site)
+            reference_site.insertItem(0, tr("All websites (shared setting)", "Semua situs (pengaturan bersama)"), "")
+            reference_site.setCurrentIndex(0)
+            reference_site.setEditable(False)
+            reference_subcategory = QLineEdit()
+            reference_subcategory.setObjectName("configReferenceSubcategory")
+            reference_page_type = QComboBox()
+            reference_page_type.setObjectName("configReferencePageType")
+            reference_page_type.setToolTip(tr("Apply this common setting to the whole website or only one page type, such as bookmarks or a gallery.", "Terapkan pengaturan umum ini ke seluruh situs atau satu jenis halaman, seperti bookmark atau galeri."))
+            reference_subcategory.setPlaceholderText(tr("Optional page type, e.g. user", "Jenis halaman opsional, mis. user"))
+            reference_downloader = QComboBox()
+            reference_downloader.setObjectName("configReferenceDownloader")
+            for label, name in ((tr("All downloaders", "Semua downloader"), ""), ("HTTP", "http"), ("yt-dlp", "ytdl")):
+                reference_downloader.addItem(label, name)
+            reference_postprocessor = QComboBox()
+            reference_postprocessor.setObjectName("configReferencePostprocessor")
+            reference_target_row.addWidget(reference_site, 2)
+            reference_target_row.addWidget(reference_page_type, 1)
+            reference_target_row.addWidget(reference_subcategory, 1)
+            reference_target_row.addWidget(reference_downloader, 1)
+            reference_target_row.addWidget(reference_postprocessor, 1)
+            reference_l.addLayout(reference_target_row)
             reference_editor = QGridLayout()
             reference_type = QComboBox()
             reference_type.setObjectName("configReferenceType")
-            for label, kind in (("Text", "text"), ("Boolean", "boolean"), ("Integer", "integer"),
-                                ("Number", "number"), ("JSON", "json"), ("Null", "null")):
+            for label, kind in ((tr("Text", "Teks"), "text"), (tr("Yes / No", "Ya / Tidak"), "boolean"),
+                                (tr("Whole number", "Bilangan bulat"), "integer"), (tr("Number", "Angka"), "number"),
+                                (tr("List / named values", "Daftar / pasangan nama-nilai"), "json"), ("Null", "null")):
                 reference_type.addItem(label, kind)
             reference_value = QLineEdit()
             reference_value.setObjectName("configReferenceValue")
             reference_value.setPlaceholderText(tr("Typed value for selected path", "Nilai sesuai tipe untuk path terpilih"))
+            reference_choice = QComboBox()
+            reference_choice.setObjectName("configReferenceChoice")
+            reference_editor.addWidget(reference_choice, 0, 0, 1, 3)
             reference_ack = QCheckBox(tr("Allow plain-text storage of this secret", "Izinkan penyimpanan teks biasa untuk rahasia ini"))
             reference_ack.setObjectName("configReferenceSecretAck")
-            reference_set = QPushButton(tr("Set path", "Atur path"))
+            reference_set = QPushButton(tr("Apply this setting", "Terapkan pengaturan ini"))
             reference_set.setObjectName("setReferenceOption")
-            reference_remove = QPushButton(tr("Remove path", "Hapus path"))
+            reference_remove = QPushButton(tr("Use default", "Pakai bawaan"))
             reference_remove.setObjectName("removeReferenceOption")
-            reference_editor.addWidget(reference_type, 0, 0)
-            reference_editor.addWidget(reference_value, 0, 1, 1, 2)
-            reference_editor.addWidget(reference_ack, 1, 1, 1, 2)
-            reference_editor.addWidget(reference_set, 2, 1)
-            reference_editor.addWidget(reference_remove, 2, 2)
+            reference_editor.addWidget(reference_type, 1, 0)
+            reference_editor.addWidget(reference_value, 1, 1, 1, 2)
+            reference_editor.addWidget(reference_ack, 2, 1, 1, 2)
+            reference_editor.addWidget(reference_set, 3, 1)
+            reference_editor.addWidget(reference_remove, 3, 2)
             reference_editor.setColumnStretch(1, 1)
             reference_l.addLayout(reference_editor)
+            reference_structured = StructuredConfigEditor(parse_typed_config_value, indonesian=ind)
+            reference_structured.setObjectName("configReferenceStructuredValue")
+            reference_l.addWidget(reference_structured)
+            reference_apply_note = QLabel(tr(
+                "Your edits stay in the draft when you choose another setting. Save config checks and saves all edits. For a list, add one item per row; named values need a name and a replacement/value.",
+                "Edit tetap ada di draft saat memilih pengaturan lain. Simpan config memeriksa dan menyimpan semua edit. Untuk daftar, tambahkan satu item per baris; pasangan membutuhkan nama dan pengganti/nilai.",
+            ))
+            reference_apply_note.setWordWrap(True)
+            reference_l.addWidget(reference_apply_note)
             reference_link = QLabel(
                 '<a href="https://gdl-org.github.io/docs/configuration.html">'
                 + tr("Open current official documentation", "Buka dokumentasi resmi terkini") + "</a>"
             )
             reference_link.setOpenExternalLinks(True)
             reference_l.addWidget(reference_link)
-            studio_tabs.addTab(reference_page, tr("Full Reference", "Referensi Lengkap"))
+            reference_splitter = QSplitter(Qt.Horizontal)
+            reference_browser = QWidget()
+            reference_browser_l = QVBoxLayout(reference_browser)
+            reference_browser_l.setContentsMargins(0, 0, 0, 0)
+            for widget in (reference_group, reference_search, reference_table):
+                reference_l.removeWidget(widget)
+                reference_browser_l.addWidget(widget)
+            reference_details = QWidget()
+            reference_details_l = QVBoxLayout(reference_details)
+            for widget in (reference_help, reference_status):
+                reference_l.removeWidget(widget)
+                reference_details_l.addWidget(widget)
+            for layout in (reference_target_row, reference_editor):
+                reference_l.removeItem(layout)
+                reference_details_l.addLayout(layout)
+            for widget in (reference_structured, reference_apply_note, reference_link):
+                reference_l.removeWidget(widget)
+                reference_details_l.addWidget(widget)
+            reference_details_l.addStretch(1)
+            reference_scroll = QScrollArea()
+            reference_scroll.setWidgetResizable(True)
+            reference_scroll.setFrameShape(QFrame.NoFrame)
+            reference_scroll.setWidget(reference_details)
+            reference_splitter.addWidget(reference_browser)
+            reference_splitter.addWidget(reference_scroll)
+            reference_splitter.setSizes([380, 620])
+            reference_l.addWidget(reference_splitter, 1)
+            studio_tabs.addTab(reference_page, tr("All gallery-dl settings", "Semua pengaturan gallery-dl"))
 
-            def reference_path() -> tuple[str, ...] | None:
+            def reference_site_name() -> str:
+                return reference_site.currentText() if reference_site.currentIndex() > 0 else ""
+
+            def reference_raw_path() -> str:
                 row = reference_table.currentRow()
                 item = reference_table.item(row, 0) if row >= 0 else None
-                raw = item.text() if item is not None else ""
-                if not raw or raw.startswith("postprocessor.") or "[" in raw or "]" in raw:
-                    return None
-                parts = tuple(part for part in raw.split(".") if part != "*")
-                if any(not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", part) for part in parts):
-                    return None
-                return parts
+                return str(item.data(Qt.UserRole) or item.text()) if item is not None else ""
 
-            def update_reference_editor(*_args) -> None:
+            def reference_path() -> ConfigPath | None:
+                try:
+                    return resolve_config_path(
+                        reference_raw_path(), site=reference_site_name(),
+                        subcategory=reference_subcategory.text().strip(),
+                        downloader=str(reference_downloader.currentData() or ""),
+                        postprocessor_index=int(reference_postprocessor.currentData() or 0),
+                    )
+                except ValueError:
+                    return None
+
+            reference_pending: dict[ConfigPath, dict] = {}
+
+            def load_reference_editor() -> None:
+                raw_path = reference_raw_path()
+                entry = next((item for item in documented_config_options() if item.get("path") == raw_path), {})
+                postprocessor = raw_path.startswith("postprocessor.")
+                choose_site = postprocessor or raw_path.startswith("extractor.*.") or raw_path.startswith("extractor.[")
+                reference_site.setVisible(choose_site)
+                reference_subcategory.setVisible(raw_path.startswith("extractor.*.") and bool(reference_site_name()))
+                reference_page_type.setVisible(raw_path.startswith("extractor.*.") and bool(reference_site_name()))
+                reference_downloader.setVisible(raw_path.startswith("downloader.*."))
+                reference_postprocessor.setVisible(postprocessor)
+                if postprocessor:
+                    base = ("extractor", *([reference_site_name()] if reference_site_name() else []), "postprocessors")
+                    items, _ = config_path_value(proposed_config(), base, [])
+                    items = items if isinstance(items, list) else [items] if isinstance(items, (dict, str)) else []
+                    kind = raw_path.split(".")[1]
+                    selected_index = reference_postprocessor.currentData()
+                    reference_postprocessor.blockSignals(True)
+                    reference_postprocessor.clear()
+                    for index, item in enumerate(items):
+                        if isinstance(item, (dict, str)) and resolved_postprocessor_action(proposed_config(), item).get("name") == kind:
+                            reference_postprocessor.addItem(f"{kind} #{index + 1}", index)
+                    reference_postprocessor.addItem(tr(f"New {kind} action", f"Tindakan {kind} baru"), len(items))
+                    match_index = reference_postprocessor.findData(selected_index)
+                    reference_postprocessor.setCurrentIndex(max(0, match_index))
+                    reference_postprocessor.blockSignals(False)
+                reference_help.setPlainText(
+                    str(entry.get("description") or "")
+                    + "\n\n" + tr("Default: ", "Bawaan: ") + str(entry.get("default_text") or json.dumps(entry.get("default")))
+                    + ("\n\n" + tr("Example: ", "Contoh: ") + str(entry["example"]) if entry.get("example") else "")
+                    + ("\n\n" + str(entry["notes"]) if entry.get("notes") else "")
+                )
                 path = reference_path()
+                reference_page.setProperty("editorPath", path)
                 can_edit = path is not None
                 reference_set.setEnabled(can_edit)
                 reference_remove.setEnabled(can_edit)
                 if not can_edit:
                     reference_status.setText(tr(
-                        "Choose a concrete path. Postprocessor fields must be placed inside an extractor.postprocessors item.",
-                        "Pilih path konkret. Field postprocessor harus ditaruh dalam item extractor.postprocessors.",
+                        "Choose a compatible website above for a setting shared by a family of websites.",
+                        "Pilih situs yang sesuai di atas untuk pengaturan keluarga situs.",
                     ))
                     reference_value.clear()
                     reference_ack.hide()
+                    reference_choice.hide()
+                    reference_structured.hide()
+                    reference_value.setProperty("dirty", False)
                     return
-                raw_path = reference_table.item(reference_table.currentRow(), 0).text()
-                entry = next((item for item in documented_config_options() if item.get("path") == raw_path), {})
                 type_index = reference_type.findData(str(entry.get("type") or "text"))
                 reference_type.setCurrentIndex(max(0, type_index))
-                node: object = proposed_config()
-                explicitly_set = True
-                for part in path:
-                    if not isinstance(node, dict) or part not in node:
-                        explicitly_set = False
-                        node = entry.get("default")
-                        break
-                    node = node[part]
+                node, explicitly_set = config_path_value(proposed_config(), path, entry.get("default"))
+                if postprocessor and not explicitly_set:
+                    action, found = config_path_value(proposed_config(), path[:-1])
+                    if not found:
+                        items, _ = config_path_value(proposed_config(), path[:-2])
+                        if path[-2] == 0 and isinstance(items, (dict, str)):
+                            action, found = items, True
+                    if found and isinstance(action, (dict, str)):
+                        node = resolved_postprocessor_action(proposed_config(), action).get(path[-1], node)
+                actual_type = "boolean" if isinstance(node, bool) else "integer" if isinstance(node, int) else "number" if isinstance(node, float) else "json" if isinstance(node, (dict, list)) else "text" if isinstance(node, str) else None
+                if actual_type:
+                    reference_type.setCurrentIndex(reference_type.findData(actual_type))
+                reference_structured.configure(
+                    allowed_types=tuple(entry.get("allowed_types") or ("list", "object")),
+                    string_items=bool(entry.get("string_items")) or path[-1] == "extension-map", item_choices=tuple(entry.get("choices") or entry.get("suggestions") or ()),
+                    hint=tr(*_STARTER_OPTION_HELP[path[-1]]) if path[-1] in _STARTER_OPTION_HELP else str(entry.get("description") or ""),
+                    example=config_example_value(str(entry.get("example") or "")) or ({"jpeg": "jpg"} if path[-1] == "extension-map" else None),
+                    name_hint="jpeg" if path[-1] == "extension-map" else "",
+                    value_hint="jpg" if path[-1] == "extension-map" else "journal_mode=WAL" if path[-1] == "archive-pragma" else "",
+                    allow_default_key=path[-1] in {"directory", "filename"},
+                )
+                structured_value = node if node is not None else {} if "object" in str(entry.get("declared_type")) else []
+                reference_structured.set_value(structured_value)
+                if path[-1] == "extension-map":
+                    reference_structured.table.setHorizontalHeaderLabels([tr("Original extension", "Ekstensi asal"), tr("Value type", "Jenis nilai"), tr("Replacement", "Pengganti")])
+                else:
+                    reference_structured.table.setHorizontalHeaderLabels([tr("Name", "Nama"), tr("Value type", "Jenis nilai"), tr("One item per row", "Satu item per baris")])
+                if path[-1] in {"directory", "filename"}:
+                    reference_structured.table.setHorizontalHeaderLabels([tr("Condition (blank = otherwise)", "Kondisi (kosong = jika lainnya tidak cocok)"), tr("Value type", "Jenis nilai"), tr("Folder / filename pattern", "Pola folder / nama file")])
+                    reference_structured.help.setText(tr("Conditional patterns: each row has a condition and its result. A blank condition is the fallback when no other row matches. Conditions are saved without being evaluated here.", "Pola bersyarat: setiap baris berisi kondisi dan hasilnya. Kondisi kosong dipakai saat baris lain tidak cocok. Kondisi disimpan tanpa dievaluasi di sini."))
                 sensitive = is_sensitive_option_key(path[-1])
-                reference_ack.setVisible(sensitive)
+                reference_ack.setVisible(sensitive or reference_type.currentData() == "json")
                 reference_ack.setChecked(False)
                 reference_value.setEchoMode(QLineEdit.Password if sensitive else QLineEdit.Normal)
                 if sensitive:
@@ -2601,55 +3155,108 @@ class ComposerMixin:
                     reference_value.setText(str(node).lower())
                 else:
                     reference_value.setText(str(node))
+                choices = list(entry.get("choices") or ())
+                if entry.get("type") == "boolean" and not choices:
+                    choices = [True, False]
+                reference_choice.blockSignals(True)
+                reference_choice.clear()
+                reference_choice.addItem(tr("Enter a custom value below", "Masukkan nilai khusus di bawah"))
+                for choice in choices:
+                    label = (tr("Enabled", "Aktif") if choice else tr("Disabled", "Nonaktif")) if isinstance(choice, bool) else str(choice)
+                    reference_choice.addItem(label, choice)
+                matching = next((index for index in range(1, reference_choice.count()) if
+                                 type(reference_choice.itemData(index)) is type(node) and reference_choice.itemData(index) == node), 0)
+                reference_choice.setCurrentIndex(matching)
+                reference_choice.setVisible(bool(choices) and not sensitive)
+                reference_choice.blockSignals(False)
                 reference_status.setText(
-                    ".".join(path) + " · "
+                    ".".join(str(part) for part in path) + " · "
                     + (tr("Set in config", "Diatur dalam config") if explicitly_set else tr("Manual default", "Default manual"))
-                    + " · " + str(entry.get("description") or "")
                 )
+                reference_status.setProperty("appliedStatus", reference_status.text())
+                reference_remove.setEnabled(explicitly_set)
+                reference_value.setProperty("dirty", False)
+                pending = reference_pending.get(path)
+                if pending:
+                    reference_remove.setEnabled(True)
+                    reference_type.setCurrentIndex(reference_type.findData(pending["type"]))
+                    reference_value.setText(pending["raw"])
+                    reference_structured.set_snapshot(pending["snapshot"])
+                    reference_ack.setChecked(pending["ack"])
+                    reference_choice.blockSignals(True)
+                    reference_choice.setCurrentIndex(0)
+                    reference_choice.blockSignals(False)
+                    reference_value.setProperty("dirty", True)
+                    reference_status.setText(reference_status.text() + tr(" · Unsaved draft", " · Draft belum disimpan"))
+                show_reference_value_editor()
+
+            def update_reference_editor(*_args) -> None:
+                reference_page.setProperty("loading", True)
+                try:
+                    load_reference_editor()
+                finally:
+                    reference_page.setProperty("loading", False)
 
             def reload_reference(*_args) -> None:
                 needle = reference_search.text().strip().lower()
                 entries = [
                     item for item in documented_config_options()
-                    if not needle or needle in " ".join((
+                    if str(item.get("path") or "").startswith(str(reference_group.currentData() or ""))
+                    and (not needle or needle in " ".join((
                         str(item.get("path") or ""),
                         str(item.get("description") or ""),
-                    )).lower()
+                        " ".join(_FRIENDLY_OPTION_NAMES.get(str(item.get("path") or "").split(".")[-1], ())),
+                    )).lower())
                 ]
+                reference_table.blockSignals(True)
                 reference_table.setRowCount(len(entries))
                 for row, entry in enumerate(entries):
+                    raw = str(entry.get("path") or "")
+                    parts = raw.split(".")
+                    names = _FRIENDLY_OPTION_NAMES.get(parts[-1])
+                    label = tr(*names) if names else parts[-1].replace("-", " ").capitalize()
                     for column, value in enumerate((
-                        entry.get("path", ""), entry.get("type", ""), entry.get("description", ""),
+                        label, ".".join(parts[:2]),
                     )):
-                        reference_table.setItem(row, column, QTableWidgetItem(str(value)))
+                        item = QTableWidgetItem(str(value))
+                        item.setData(Qt.UserRole, raw)
+                        item.setToolTip(raw)
+                        reference_table.setItem(row, column, item)
                 if entries:
                     reference_table.setCurrentCell(0, 0)
+                reference_table.blockSignals(False)
                 update_reference_editor()
 
-            def set_reference_option() -> None:
+            def set_reference_option() -> bool:
                 path = reference_path()
                 if path is None:
-                    return
+                    return False
                 try:
-                    if is_sensitive_option_key(path[-1]) and not reference_ack.isChecked():
+                    value = reference_structured.value() if reference_type.currentData() == "json" else parse_typed_config_value(reference_value.text(), str(reference_type.currentData()))
+                    if (is_sensitive_option_key(path[-1]) or contains_config_secrets(value)) and not reference_ack.isChecked():
                         raise ValueError(tr("Confirm plain-text storage first.", "Konfirmasikan penyimpanan teks biasa."))
-                    value = parse_typed_config_value(reference_value.text(), str(reference_type.currentData()))
-                    apply_config_path_drafts(proposed_config(), overrides={path: value})
+                    additions = {path: value}
+                    if reference_raw_path().startswith("postprocessor."):
+                        additions.update(reference_action_name(path, reference_raw_path().split(".")[1]))
+                    apply_config_path_drafts(proposed_config(), overrides=additions)
                 except ValueError as exc:
                     self.show_compact_message("Config path", str(exc), "warning")
-                    return
-                path_overrides[path] = value
+                    return False
+                path_overrides.update(additions)
+                reference_pending.pop(path, None)
                 path_removals.discard(path)
                 scope.setCurrentIndex(scope.findData("config"))
                 refresh_preview()
                 update_studio_preview()
                 update_reference_editor()
+                return True
 
             def remove_reference_option() -> None:
                 path = reference_path()
                 if path is None:
                     return
                 path_overrides.pop(path, None)
+                reference_pending.pop(path, None)
                 path_removals.add(path)
                 scope.setCurrentIndex(scope.findData("config"))
                 refresh_preview()
@@ -2657,10 +3264,130 @@ class ComposerMixin:
                 update_reference_editor()
 
             reference_search.textChanged.connect(reload_reference)
+            reference_group.currentIndexChanged.connect(reload_reference)
             reference_table.cellClicked.connect(update_reference_editor)
+            reference_table.currentCellChanged.connect(update_reference_editor)
+            reference_site.currentIndexChanged.connect(update_reference_editor)
+            def refresh_page_types(*_args) -> None:
+                category = reference_site_name()
+                choices = set(installed_page_types(category))
+                saved, _ = config_path_value(proposed_config(), ("extractor", category), {})
+                option_keys = {spec.key for spec in config_option_definitions(category)}
+                if isinstance(saved, dict):
+                    choices.update(key for key, value in saved.items() if isinstance(value, dict) and key not in option_keys and re.fullmatch(r"[a-z][a-z0-9_-]*", key))
+                reference_page_type.blockSignals(True)
+                reference_page_type.clear()
+                reference_page_type.addItem(tr("Whole website", "Seluruh situs"), "")
+                for key in sorted(choices):
+                    label = tr(*URL_MODE_LABELS[key]) if key in URL_MODE_LABELS else key.replace("-", " ").capitalize()
+                    reference_page_type.addItem(f"{label} ({key})", key)
+                reference_page_type.blockSignals(False)
+                reference_subcategory.clear()
+            reference_site.currentIndexChanged.connect(refresh_page_types)
+            reference_page_type.currentIndexChanged.connect(lambda: reference_subcategory.setText(str(reference_page_type.currentData() or "")))
+            refresh_page_types()
+            reference_subcategory.textChanged.connect(update_reference_editor)
+            reference_downloader.currentIndexChanged.connect(update_reference_editor)
+            reference_postprocessor.currentIndexChanged.connect(update_reference_editor)
+
+            def show_reference_value_editor(*_args) -> None:
+                structured = reference_type.currentData() == "json" and reference_path() is not None
+                reference_structured.setVisible(structured)
+                reference_value.setVisible(not structured)
+                path = reference_path()
+                sensitive_value = False
+                if structured:
+                    try:
+                        sensitive_value = contains_config_secrets(reference_structured.value())
+                    except ValueError:
+                        sensitive_value = reference_structured.kind.currentData() == "object" and any(
+                            is_sensitive_option_key(row[0]) for row in reference_structured.snapshot()["rows"]
+                        )
+                reference_ack.setVisible(bool(path) and (sensitive_value or is_sensitive_option_key(path[-1])))
+
+            def reference_action_name(path: ConfigPath, kind: str) -> dict:
+                action, found = config_path_value(proposed_config(), path[:-1])
+                if not found and path[-2] == 0:
+                    action, found = config_path_value(proposed_config(), path[:-2])
+                if found and isinstance(action, (dict, str)) and resolved_postprocessor_action(proposed_config(), action).get("name") == kind:
+                    return {}
+                return {path[:-1] + ("name",): kind}
+
+            def mark_reference_dirty(*_args) -> None:
+                if reference_page.property("loading"):
+                    return
+                path = reference_page.property("editorPath")
+                if not path:
+                    return
+                path = tuple(path)
+                raw_path = reference_raw_path()
+                reference_pending[path] = {
+                    "document": raw_path, "site": reference_site_name(),
+                    "subcategory": reference_subcategory.text(), "downloader": reference_downloader.currentData(),
+                    "postprocessor": reference_postprocessor.currentData(), "type": reference_type.currentData(),
+                    "raw": reference_value.text(), "snapshot": reference_structured.snapshot(), "ack": reference_ack.isChecked(),
+                }
+                if raw_path.startswith("postprocessor."):
+                    # Reserve an action immediately so another action type
+                    # cannot reuse this draft's new list index.
+                    path_overrides.update(reference_action_name(path, raw_path.split(".")[1]))
+                reference_value.setProperty("dirty", True)
+                reference_status.setText(str(reference_status.property("appliedStatus") or "") + tr(
+                    f" · {len(reference_pending)} unsaved edit(s); Save config saves all",
+                    f" · {len(reference_pending)} edit belum disimpan; Simpan config menyimpan semua",
+                ))
+
+            reference_value.textChanged.connect(mark_reference_dirty)
+            reference_ack.toggled.connect(mark_reference_dirty)
+            reference_type.currentIndexChanged.connect(show_reference_value_editor)
+            reference_type.activated.connect(mark_reference_dirty)
+            reference_structured.valueChanged.connect(mark_reference_dirty)
+            reference_structured.valueChanged.connect(show_reference_value_editor)
+
+            def choose_reference_value(index: int) -> None:
+                if index <= 0:
+                    return
+                value = reference_choice.currentData()
+                kind = "boolean" if isinstance(value, bool) else "integer" if isinstance(value, int) else "number" if isinstance(value, float) else "null" if value is None else "text"
+                reference_type.setCurrentIndex(reference_type.findData(kind))
+                reference_value.setText(json.dumps(value) if not isinstance(value, str) else value)
+                mark_reference_dirty()
+
+            reference_choice.currentIndexChanged.connect(choose_reference_value)
             reference_set.clicked.connect(set_reference_option)
             reference_remove.clicked.connect(remove_reference_option)
             reload_reference()
+
+            def apply_pending_reference_options() -> bool:
+                additions: dict[ConfigPath, object] = {}
+                for path, draft in list(reference_pending.items()):
+                    try:
+                        value = StructuredConfigEditor.parse_snapshot(draft["snapshot"], parse_typed_config_value) if draft["type"] == "json" else parse_typed_config_value(draft["raw"], draft["type"])
+                        if (is_sensitive_option_key(path[-1]) or contains_config_secrets(value)) and not draft["ack"]:
+                            raise ValueError(tr("Confirm plain-text storage first.", "Konfirmasikan penyimpanan teks biasa."))
+                        additions[path] = value
+                        apply_config_path_drafts(proposed_config(), overrides=additions)
+                    except ValueError as exc:
+                        reference_group.setCurrentIndex(0)
+                        reference_search.setText(draft["document"])
+                        reference_site.setCurrentIndex(max(0, reference_site.findText(draft["site"])))
+                        reference_subcategory.setText(draft["subcategory"])
+                        reference_downloader.setCurrentIndex(max(0, reference_downloader.findData(draft["downloader"])))
+                        reference_postprocessor.setCurrentIndex(max(0, reference_postprocessor.findData(draft["postprocessor"])))
+                        studio_tabs.setCurrentWidget(reference_page)
+                        self.show_compact_message(tr("Check this setting", "Periksa pengaturan ini"),
+                                                  ".".join(map(str, path)) + ": " + str(exc), "warning")
+                        return False
+                path_overrides.update(additions)
+                for path in additions:
+                    path_removals.discard(path)
+                reference_pending.clear()
+                update_reference_editor()
+                if additions:
+                    scope.setCurrentIndex(scope.findData("config"))
+                    refresh_preview()
+                    update_studio_preview()
+                return True
 
             # Archive database -------------------------------------------------
             archive_page = QWidget()
@@ -2702,167 +3429,7 @@ class ComposerMixin:
             archive_l.addLayout(archive_buttons, 5, 0, 1, 3)
             archive_l.setColumnStretch(1, 1)
             archive_l.setRowStretch(6, 1)
-            studio_tabs.addTab(archive_page, tr("Archive", "Archive"))
-
-            # Reddit -----------------------------------------------------------
-            reddit_page = QWidget()
-            reddit_l = QGridLayout(reddit_page)
-            reddit_l.setContentsMargins(12, 12, 12, 12)
-            reddit_client_id = QLineEdit()
-            reddit_client_id.setObjectName("redditClientId")
-            reddit_client_id.setEchoMode(QLineEdit.Password)
-            reddit_client_id.setPlaceholderText(tr(
-                "Reddit application client ID (leave blank to keep existing)",
-                "Client ID aplikasi Reddit (kosongkan untuk mempertahankan nilai lama)",
-            ))
-            reddit_user_agent = QLineEdit()
-            reddit_user_agent.setObjectName("redditOAuthUserAgent")
-            reddit_user_agent.setPlaceholderText(f"Python:Downloader:v{APP_VERSION} (by /u/your_username)")
-            reddit_show = QCheckBox(tr("Show client ID", "Tampilkan client ID"))
-            reddit_apply = QPushButton(tr("Apply Reddit settings", "Terapkan pengaturan Reddit"))
-            reddit_apply.setObjectName("applyRedditSettings")
-            reddit_note = QLabel(tr(
-                "Current gallery-dl uses client-id and user-agent-oauth for Reddit OAuth. The older plain user-agent key is not generated. After changing client-id, clear Reddit's cache from Accounts before reconnecting OAuth.",
-                "gallery-dl saat ini memakai client-id dan user-agent-oauth untuk OAuth Reddit. Key user-agent lama tidak dibuat. Setelah mengubah client-id, bersihkan cache Reddit dari Accounts sebelum menyambungkan OAuth lagi.",
-            ))
-            reddit_note.setWordWrap(True)
-            reddit_note.setObjectName("subtle")
-            reddit_l.addWidget(QLabel("client-id"), 0, 0)
-            reddit_l.addWidget(reddit_client_id, 0, 1)
-            reddit_l.addWidget(reddit_show, 1, 1)
-            reddit_l.addWidget(QLabel("user-agent-oauth"), 2, 0)
-            reddit_l.addWidget(reddit_user_agent, 2, 1)
-            reddit_l.addWidget(reddit_note, 3, 0, 1, 2)
-            reddit_l.addWidget(reddit_apply, 4, 0, 1, 2, Qt.AlignLeft)
-            reddit_l.setColumnStretch(1, 1)
-            reddit_l.setRowStretch(5, 1)
-            studio_tabs.addTab(reddit_page, "Reddit")
-
-            # Pixiv ------------------------------------------------------------
-            pixiv_scroll = QScrollArea()
-            pixiv_scroll.setWidgetResizable(True)
-            pixiv_scroll.setFrameShape(QFrame.NoFrame)
-            pixiv_page = QWidget()
-            pixiv_l = QVBoxLayout(pixiv_page)
-            pixiv_l.setContentsMargins(12, 12, 12, 12)
-            pixiv_scroll.setWidget(pixiv_page)
-            pixiv_heading = QLabel(tr("Pixiv profile sections", "Bagian profil Pixiv"))
-            pixiv_heading.setObjectName("sectionTitle")
-            pixiv_l.addWidget(pixiv_heading)
-            pixiv_intro = QLabel(tr(
-                "Choose what a user-profile URL includes. Artwork and novel options below are saved to their own gallery-dl sections.",
-                "Pilih isi URL profil pengguna. Opsi karya dan novel di bawah disimpan ke bagian gallery-dl masing-masing.",
-            ))
-            pixiv_intro.setWordWrap(True)
-            pixiv_intro.setObjectName("subtle")
-            pixiv_l.addWidget(pixiv_intro)
-            pixiv_include_card = QFrame()
-            pixiv_include_card.setObjectName("card")
-            pixiv_include_l = QVBoxLayout(pixiv_include_card)
-            pixiv_include_l.addWidget(QLabel("pixiv.include"))
-            pixiv_include_grid = QGridLayout()
-            pixiv_include_grid.setHorizontalSpacing(20)
-            pixiv_include_grid.setVerticalSpacing(8)
-            pixiv_include: dict[str, QCheckBox] = {}
-            for index, value in enumerate((
-                "artworks", "avatar", "background", "favorite",
-                "novel-user", "novel-bookmark", "sketch",
-            )):
-                checkbox = QCheckBox(value)
-                checkbox.setObjectName(f"pixivInclude_{value}")
-                pixiv_include[value] = checkbox
-                pixiv_include_grid.addWidget(checkbox, index // 2, index % 2)
-            pixiv_include_grid.setColumnStretch(0, 1)
-            pixiv_include_grid.setColumnStretch(1, 1)
-            pixiv_include_l.addLayout(pixiv_include_grid)
-            pixiv_l.addWidget(pixiv_include_card)
-
-            pixiv_options_row = QHBoxLayout()
-            pixiv_options_row.setSpacing(12)
-            pixiv_art_card = QFrame()
-            pixiv_art_card.setObjectName("card")
-            pixiv_art_l = QVBoxLayout(pixiv_art_card)
-            pixiv_art_l.addWidget(QLabel(tr("Artwork · extractor.pixiv", "Karya · extractor.pixiv")))
-            pixiv_metadata = QCheckBox("metadata")
-            pixiv_metadata.setObjectName("pixivArtworkMetadata")
-            pixiv_metadata_bookmark = QCheckBox("metadata-bookmark")
-            pixiv_captions = QCheckBox("captions")
-            pixiv_captions.setObjectName("pixivArtworkCaptions")
-            pixiv_comments = QCheckBox("comments")
-            for checkbox in (pixiv_metadata, pixiv_metadata_bookmark, pixiv_captions, pixiv_comments):
-                pixiv_art_l.addWidget(checkbox)
-            pixiv_tags = QComboBox()
-            pixiv_tags.setObjectName("pixivTags")
-            pixiv_tags.addItems(["japanese", "translated", "original"])
-            pixiv_art_l.addWidget(QLabel("tags"))
-            pixiv_art_l.addWidget(pixiv_tags)
-            pixiv_ugoira = QComboBox()
-            pixiv_ugoira.setObjectName("pixivUgoira")
-            pixiv_ugoira.addItem(tr("Enabled", "Aktif"), True)
-            pixiv_ugoira.addItem(tr("Disabled", "Nonaktif"), False)
-            pixiv_ugoira.addItem(tr("Original frames", "Frame asli"), "original")
-            pixiv_art_l.addWidget(QLabel("ugoira"))
-            pixiv_art_l.addWidget(pixiv_ugoira)
-            pixiv_options_row.addWidget(pixiv_art_card, 1)
-
-            pixiv_novel_card = QFrame()
-            pixiv_novel_card.setObjectName("card")
-            pixiv_novel_l = QVBoxLayout(pixiv_novel_card)
-            pixiv_novel_l.addWidget(QLabel(tr("Novels · extractor.pixiv-novel", "Novel · extractor.pixiv-novel")))
-            pixiv_embeds = QCheckBox("embeds")
-            pixiv_covers = QCheckBox("covers")
-            pixiv_covers.setObjectName("pixivNovelCovers")
-            pixiv_full_series = QCheckBox("full-series")
-            pixiv_novel_metadata = QCheckBox("metadata")
-            pixiv_novel_metadata_bookmark = QCheckBox("metadata-bookmark")
-            pixiv_novel_comments = QCheckBox("comments")
-            for checkbox in (
-                pixiv_covers, pixiv_embeds, pixiv_full_series,
-                pixiv_novel_metadata, pixiv_novel_metadata_bookmark, pixiv_novel_comments,
-            ):
-                pixiv_novel_l.addWidget(checkbox)
-            pixiv_novel_tags = QComboBox()
-            pixiv_novel_tags.setObjectName("pixivNovelTags")
-            pixiv_novel_tags.addItems(["japanese", "translated", "original"])
-            pixiv_novel_l.addWidget(QLabel("tags"))
-            pixiv_novel_l.addWidget(pixiv_novel_tags)
-            pixiv_novel_l.addStretch(1)
-            pixiv_options_row.addWidget(pixiv_novel_card, 1)
-            pixiv_l.addLayout(pixiv_options_row)
-            pixiv_secret_note = QLabel(tr(
-                "Recommended: connect Pixiv through Accounts > OAuth so tokens stay in its private cache. The fields below exist only for importing a legacy manual config and will be stored as plain text in config.json.",
-                "Disarankan: sambungkan Pixiv melalui Accounts > OAuth agar token tetap berada di cache privat. Field di bawah hanya untuk mengimpor config manual lama dan akan tersimpan sebagai teks biasa di config.json.",
-            ))
-            pixiv_secret_note.setWordWrap(True)
-            pixiv_secret_note.setObjectName("subtle")
-            pixiv_l.addWidget(pixiv_secret_note)
-            pixiv_secret_grid = QGridLayout()
-            pixiv_refresh_token = QLineEdit()
-            pixiv_refresh_token.setObjectName("pixivRefreshToken")
-            pixiv_refresh_token.setEchoMode(QLineEdit.Password)
-            pixiv_refresh_token.setPlaceholderText(tr("Optional; blank keeps existing", "Opsional; kosong mempertahankan nilai lama"))
-            pixiv_phpsessid = QLineEdit()
-            pixiv_phpsessid.setObjectName("pixivPhpsessid")
-            pixiv_phpsessid.setEchoMode(QLineEdit.Password)
-            pixiv_phpsessid.setPlaceholderText(tr("Optional; blank keeps existing", "Opsional; kosong mempertahankan nilai lama"))
-            pixiv_show = QCheckBox(tr("Show manual credentials", "Tampilkan credential manual"))
-            pixiv_secret_ack = QCheckBox(tr(
-                "I understand new values are saved in plain text",
-                "Saya memahami nilai baru disimpan sebagai teks biasa",
-            ))
-            pixiv_secret_grid.addWidget(QLabel("refresh-token"), 0, 0)
-            pixiv_secret_grid.addWidget(pixiv_refresh_token, 0, 1)
-            pixiv_secret_grid.addWidget(QLabel("cookies.PHPSESSID"), 1, 0)
-            pixiv_secret_grid.addWidget(pixiv_phpsessid, 1, 1)
-            pixiv_secret_grid.addWidget(pixiv_show, 2, 1)
-            pixiv_secret_grid.addWidget(pixiv_secret_ack, 3, 1)
-            pixiv_secret_grid.setColumnStretch(1, 1)
-            pixiv_l.addLayout(pixiv_secret_grid)
-            pixiv_apply = QPushButton(tr("Apply Pixiv settings", "Terapkan pengaturan Pixiv"))
-            pixiv_apply.setObjectName("applyPixivSettings")
-            pixiv_l.addWidget(pixiv_apply, 0, Qt.AlignLeft)
-            pixiv_l.addStretch(1)
-            studio_tabs.addTab(pixiv_scroll, "Pixiv")
+            studio_tabs.addTab(archive_page, tr("Download History", "Riwayat Unduhan"))
 
             # Typed advanced option -------------------------------------------
             advanced_page = QWidget()
@@ -2912,7 +3479,7 @@ class ComposerMixin:
             advanced_l.addWidget(advanced_apply, 6, 0, 1, 3, Qt.AlignLeft)
             advanced_l.setColumnStretch(1, 1)
             advanced_l.setRowStretch(7, 1)
-            studio_tabs.addTab(advanced_page, tr("Advanced", "Lanjutan"))
+            advanced_tabs.addTab(advanced_page, tr("Custom Option", "Opsi Khusus"))
 
             # Safe draft preview ----------------------------------------------
             draft_page = QWidget()
@@ -2921,19 +3488,66 @@ class ComposerMixin:
             draft_preview.setObjectName("siteConfigDraftPreview")
             draft_preview.setReadOnly(True)
             draft_preview.setLineWrapMode(QPlainTextEdit.NoWrap)
+            studio_summary = QPlainTextEdit()
+            studio_summary.setObjectName("siteConfigChangeSummary")
+            studio_summary.setReadOnly(True)
+            studio_summary.setMaximumHeight(170)
             draft_l.addWidget(QLabel(tr(
                 "Effective config (credentials hidden)",
                 "Config efektif (credential disembunyikan)",
             )))
+            draft_l.addWidget(studio_summary)
+            draft_l.addWidget(QLabel(tr("Generated config (advanced preview)", "Config yang dibuat (pratinjau lanjutan)")))
             draft_l.addWidget(draft_preview, 1)
             reset_draft = QPushButton(tr("Discard all Site Studio draft changes", "Buang semua perubahan draft Studio Situs"))
             draft_l.addWidget(reset_draft, 0, Qt.AlignLeft)
-            studio_tabs.addTab(draft_page, tr("Safe Preview", "Preview Aman"))
+            studio_tabs.addTab(draft_page, tr("Review Changes", "Periksa Perubahan"))
+            studio_tabs.addTab(advanced_tabs, tr("More Tools", "Alat Lanjutan"))
+
+            def stage_postprocessors(category: str, actions: list[dict | str] | None) -> None:
+                path = ("extractor", *([category] if category else []), "postprocessors")
+                for key in list(path_overrides):
+                    if key[:len(path)] == path:
+                        path_overrides.pop(key)
+                path_removals.difference_update(key for key in list(path_removals) if key[:len(path)] == path)
+                if actions is None:
+                    path_removals.add(path)
+                else:
+                    path_overrides[path] = actions
+                scope.setCurrentIndex(scope.findData("config"))
+                refresh_preview()
+                update_studio_preview()
+
+            postprocessor_editor = PostprocessorEditor(
+                site_names, proposed_config, stage_postprocessors, site=selected_studio_site, indonesian=ind,
+            )
+            postprocessor_editor.setProperty("sourceSite", selected_studio_site)
+            studio_tabs.insertTab(1, postprocessor_editor, tr("After downloading", "Setelah Mengunduh"))
+
+            def open_postprocessor_catalog(category: str, name: str, index: int) -> None:
+                reference_group.setCurrentIndex(max(0, reference_group.findData("postprocessor.")))
+                reference_search.setText("postprocessor." + (name + "." if name else ""))
+                reference_site.setCurrentIndex(max(0, reference_site.findText(category)))
+                reference_postprocessor.setCurrentIndex(max(0, reference_postprocessor.findData(index)))
+                studio_tabs.setCurrentWidget(reference_page)
+
+            postprocessor_editor.advancedRequested.connect(open_postprocessor_catalog)
+
+            def stage_postprocessor_setting(category: str, key: str, value: object) -> None:
+                path = ("extractor", *([category] if category else []), key)
+                path_removals.discard(path)
+                path_overrides[path] = value
+                scope.setCurrentIndex(scope.findData("config"))
+                refresh_preview()
+                update_studio_preview()
+
+            postprocessor_editor.settingRequested.connect(stage_postprocessor_setting)
 
             def update_studio_preview() -> None:
                 effective = proposed_config()
                 safe = redact_auth_config(effective)
                 draft_preview.setPlainText(json.dumps(safe, indent=2, ensure_ascii=False))
+                studio_summary.setPlainText(describe_changes(proposed_config()))
 
             def selected_config_category() -> str:
                 if config_scope.currentData() == "general":
@@ -2962,6 +3576,536 @@ class ComposerMixin:
                 elif spec.key in extractor:
                     return extractor[spec.key], tr("General", "Umum"), True
                 return spec.default, tr("Built-in default", "Default bawaan"), False
+
+            site_options_pending: dict[str, dict[str, tuple[object, bool, bool]]] = {}
+
+            def site_form_specs(category: str) -> tuple[ConfigOptionSpec, ...]:
+                specs = {spec.key: spec for spec in config_option_definitions(category)}
+                block, _ = config_path_value(proposed_config(), ("extractor", category), {})
+                if isinstance(block, dict):
+                    for key, value in block.items():
+                        if key not in specs and re.fullmatch(r"[a-z][a-z0-9-]*", key):
+                            specs[key] = ConfigOptionSpec(
+                                key=key, value_type=_option_value_type(key, value), group="From your config",
+                                description=tr("Existing option from your config. Its value is preserved until you edit it.", "Opsi lama dari config Anda. Nilainya dipertahankan sampai Anda mengeditnya."),
+                                sensitive=is_sensitive_option_key(key),
+                            )
+                return tuple(sorted(specs.values(), key=lambda spec: (spec.group, spec.key)))
+
+            def friendly_option_name(key: str) -> str:
+                names = _FRIENDLY_OPTION_NAMES.get(key)
+                return tr(*names) if names else key.replace("-", " ").replace("_", " ").capitalize()
+
+            def update_site_options_status(category: str, shown_count: int, hidden_count: int) -> None:
+                pending_count = len(site_options_pending.get(category, {}))
+                site_options_status.setText(tr(
+                    f"{category}: {shown_count} settings shown" +
+                    (f" · {hidden_count} more under Show all settings" if hidden_count else "") +
+                    f" · {pending_count} change(s) ready to apply.",
+                    f"{category}: {shown_count} pengaturan tampil" +
+                    (f" · {hidden_count} lainnya di Tampilkan semua pengaturan" if hidden_count else "") +
+                    f" · {pending_count} perubahan siap diterapkan.",
+                ))
+                site_options_apply.setEnabled(pending_count > 0)
+                site_options_apply.setText(tr(
+                    f"Apply changes for {category} ({pending_count})",
+                    f"Terapkan perubahan untuk {category} ({pending_count})",
+                ))
+
+            def reload_site_options(*_args) -> None:
+                while site_options_cards.count():
+                    item = site_options_cards.takeAt(0)
+                    widget = item.widget()
+                    if widget is not None:
+                        widget.setParent(None)
+                        widget.deleteLater()
+                category = site_options_site.currentText().strip().lower()
+                if category not in site_names:
+                    site_options_status.setText(tr(
+                        "Choose a site from the suggestions to see its form.",
+                        "Pilih situs dari saran untuk melihat formulirnya.",
+                    ))
+                    site_options_apply.setEnabled(False)
+                    return
+                if site_options_page.property("lastSite") != category:
+                    site_options_page.setProperty("lastSite", category)
+                    site_options_show_all.blockSignals(True)
+                    site_options_show_all.setChecked(False)
+                    site_options_show_all.blockSignals(False)
+                    if site_options_search.text():
+                        site_options_search.clear()
+                        return
+
+                specs = site_form_specs(category)
+                needle = site_options_search.text().strip().lower()
+                all_matches = [
+                    spec for spec in specs
+                    if not needle or needle in " ".join((
+                        spec.key, friendly_option_name(spec.key), spec.group, spec.description,
+                    )).lower()
+                ]
+                beginner_mode = not needle and not site_options_show_all.isChecked()
+                goal = str(site_options_goal.currentData())
+                goal_keys = {
+                    "paths": {"base-directory", "directory", "filename"},
+                    "history": {"archive"},
+                    "network": {"retries", "timeout", "sleep", "sleep-request", "sleep-429"},
+                }
+                if beginner_mode and goal in goal_keys:
+                    matching = [spec for spec in all_matches if spec.key in goal_keys[goal]]
+                elif beginner_mode and goal == "content":
+                    matching = [spec for spec in all_matches if spec.scope == "site" and spec.key in _STARTER_SITE_OPTIONS]
+                elif beginner_mode:
+                    beginner_specific = [
+                        spec for spec in all_matches
+                        if spec.scope == "site" and (
+                            spec.key in _STARTER_SITE_OPTIONS or
+                            (spec.value_type == "boolean" and spec.group in {"Content", "Metadata"})
+                        )
+                    ]
+                    priority = {key: index for index, key in enumerate(_STARTER_SITE_OPTIONS)}
+                    beginner_specific.sort(key=lambda spec: priority.get(spec.key, len(priority)))
+                    if not beginner_specific:
+                        beginner_specific = [spec for spec in all_matches if spec.scope == "site"][:4]
+                    matching = beginner_specific[:8] + [
+                        spec for spec in all_matches
+                        if spec.scope != "site" and spec.key in _STARTER_SHARED_OPTIONS
+                    ]
+                else:
+                    matching = all_matches
+                guided_paths = beginner_mode and goal == "paths"
+                specific = [spec for spec in matching if spec.scope == "site" and not (guided_paths and spec.key in {"directory", "filename"})]
+                shared = [spec for spec in matching if spec.scope != "site" and not (guided_paths and spec.key in {"directory", "filename"})]
+                hidden_count = len(all_matches) - len(matching)
+                update_site_options_status(category, len(matching), hidden_count)
+                pending = site_options_pending.setdefault(category, {})
+
+                def mark_change(key: str, value: object, parsed: bool, acknowledged: bool = False) -> None:
+                    pending[key] = (value, parsed, acknowledged)
+                    reset = studio.findChild(QPushButton, f"removeSiteOption_{key}")
+                    if reset is not None:
+                        reset.setEnabled(True)
+                    update_site_options_status(category, len(matching), hidden_count)
+
+                def stage_site_value(key: str, value: object, remove: bool) -> None:
+                    pending.pop(key, None)
+                    path = ("extractor", category, key)
+                    block = site_overrides.get(category)
+                    if block is not None:
+                        block.pop(key, None)
+                    path_overrides.pop(path, None)
+                    path_removals.discard(path)
+                    if remove:
+                        path_removals.add(path)
+                    else:
+                        path_overrides[path] = value
+                    scope.setCurrentIndex(scope.findData("config"))
+                    refresh_preview()
+                    update_studio_preview()
+                    reload_site_options()
+                    reload_config_options()
+
+                guided_path_widgets = []
+                if guided_paths:
+                    for key in ("directory", "filename"):
+                        spec = next(spec for spec in specs if spec.key == key)
+                        value, source, explicit = current_config_value(category, spec)
+                        if source == tr("Built-in default", "Default bawaan"):
+                            value = None  # Real filename/folder defaults differ by extractor.
+                        form_snapshot = None
+                        if key in pending:
+                            raw, parsed, _ = pending[key]
+                            try:
+                                if isinstance(raw, dict) and raw.get("path_rule_form") is True:
+                                    value = dict(raw["rules"])
+                                    form_snapshot = raw
+                                else:
+                                    value = raw if parsed else StructuredConfigEditor.parse_snapshot(raw, parse_typed_config_value) if isinstance(raw, dict) and "rows" in raw else parse_typed_config_value(str(raw), spec.value_type)
+                            except ValueError:
+                                note = QLabel(tr("An unsaved advanced edit needs correction. Updating a guided rule replaces that edit.", "Edit lanjutan yang belum diterapkan perlu diperbaiki. Memperbarui aturan terpandu mengganti edit tersebut."))
+                                note.setWordWrap(True)
+                                site_options_cards.addWidget(note)
+                            explicit = True
+
+                        def stage_rule(value: object, remove: bool, field: str = key) -> None:
+                            if remove:
+                                stage_site_value(field, value, True)
+                            else:
+                                mark_change(field, value, not (isinstance(value, dict) and value.get("path_rule_form") is True))
+
+                        editor = PathRulesEditor(key, value, explicit, stage_rule, site=category, indonesian=ind)
+                        if form_snapshot is not None:
+                            editor.restore_snapshot(form_snapshot)
+                        guided_path_widgets.append(editor)
+
+                if beginner_mode and goal in {"content", "starter"}:
+                    filter_spec = next(spec for spec in specs if spec.key == "file-filter")
+                    filter_value, _, filter_explicit = current_config_value(category, filter_spec)
+                    if "file-filter" in pending:
+                        filter_value = pending["file-filter"][0]
+                        filter_explicit = True
+
+                    site_options_cards.addWidget(ContentFilterEditor(
+                        filter_value, filter_explicit, lambda value, remove: stage_site_value("file-filter", value, remove), indonesian=ind,
+                    ))
+
+                if beginner_mode and goal == "history":
+                    history_spec = next(spec for spec in specs if spec.key == "archive")
+                    archive_value, _, _ = current_config_value(category, history_spec)
+                    if "archive" in pending:
+                        archive_value = pending["archive"][0]
+                    history_toggle = QCheckBox(tr("Skip items already recorded in download history", "Lewati item yang sudah tercatat di riwayat unduhan"))
+                    history_toggle.setObjectName("siteHistoryEnabled")
+                    history_toggle.setChecked(bool(archive_value))
+                    history_toggle.toggled.connect(lambda enabled: (
+                        mark_change("archive", str(archive_value or APP_DIR / "archives" / (category + ".sqlite3")) if enabled else None, True),
+                        reload_site_options(),
+                    ))
+                    site_options_cards.addWidget(history_toggle)
+                    history_note = QLabel(tr("Enable this to create a history file for this website. Its database is created when downloads run; SQLite options can stay at their defaults.", "Aktifkan untuk memakai file riwayat situs ini. Database dibuat saat unduhan berjalan; pengaturan SQLite dapat dibiarkan bawaan."))
+                    history_note.setWordWrap(True)
+                    site_options_cards.addWidget(history_note)
+
+                def add_group(group_name: str, group_specs: list[ConfigOptionSpec]) -> None:
+                    card = QFrame()
+                    card.setObjectName("card")
+                    card_l = QVBoxLayout(card)
+                    card_l.setContentsMargins(14, 12, 14, 12)
+                    heading = QLabel(group_name)
+                    heading.setObjectName("sectionTitle")
+                    card_l.addWidget(heading)
+                    fields = QGridLayout()
+                    fields.setHorizontalSpacing(18)
+                    fields.setVerticalSpacing(12)
+                    fields.setColumnStretch(0, 1)
+                    fields.setColumnStretch(1, 1)
+                    field_row = field_column = 0
+
+                    for index, spec in enumerate(group_specs):
+                        current, source, explicit = current_config_value(category, spec)
+                        saved = pending.get(spec.key)
+                        field = QWidget()
+                        field_l = QVBoxLayout(field)
+                        field_l.setContentsMargins(0, 0, 0, 0)
+                        field_l.setAlignment(Qt.AlignTop)
+                        display_name = friendly_option_name(spec.key)
+                        state = (
+                            tr("custom for this website", "khusus situs ini") if explicit else
+                            tr("from shared settings", "dari pengaturan bersama")
+                            if source == tr("Inherited General", "Warisan Umum") else
+                            tr("default", "bawaan")
+                        )
+                        label = QLabel(f"{display_name}  ·  {state}")
+                        label.setToolTip(f"{spec.key}: {spec.description}")
+                        field_l.addWidget(label)
+                        hint = None
+                        if beginner_mode or spec.key in _STARTER_OPTION_HELP or spec.example:
+                            help_text = _STARTER_OPTION_HELP.get(spec.key) if spec.key != "previews" or category == "instagram" else None
+                            hint = QLabel(tr(*help_text) if help_text else spec.description)
+                            hint.setObjectName("subtle")
+                            hint.setWordWrap(True)
+                            field_l.addWidget(hint)
+                        editor_row = QHBoxLayout()
+                        editor_row.setContentsMargins(0, 0, 0, 0)
+
+                        if spec.value_type == "json" and spec.choices and all(isinstance(choice, str) for choice in spec.choices) and (
+                            isinstance(spec.default, list) or "list" in spec.allowed_types
+                        ):
+                            control = QWidget()
+                            control.setObjectName(f"siteOptionChecklist_{spec.key}")
+                            checklist = QGridLayout(control)
+                            checklist.setContentsMargins(0, 0, 0, 0)
+                            checklist.setColumnStretch(0, 1)
+                            checklist.setColumnStretch(1, 1)
+                            selected_values = saved[0] if saved else current
+                            if isinstance(selected_values, str):
+                                selected_values = selected_values.split(",")
+                                if selected_values == ["all"]:
+                                    selected_values = list(spec.choices)
+                            selected_values = selected_values if isinstance(selected_values, list) else []
+                            checks: list[QCheckBox] = []
+                            choices = list(spec.choices) + [value for value in selected_values if value not in spec.choices]
+                            for choice_index, choice in enumerate(choices):
+                                choice_name = tr(*_INSTAGRAM_INCLUDE_NAMES[choice]) if category == "instagram" and spec.key == "include" and choice in _INSTAGRAM_INCLUDE_NAMES else str(choice).replace("-", " ").capitalize()
+                                checkbox = QCheckBox(choice_name)
+                                checkbox.setObjectName(f"siteOptionList_{spec.key}_{choice}")
+                                checkbox.setProperty("configValue", choice)
+                                checkbox.setChecked(choice in selected_values)
+                                checks.append(checkbox)
+                                checklist.addWidget(checkbox, choice_index // 2, choice_index % 2)
+
+                            def update_list(_checked: bool = False, key: str = spec.key,
+                                            boxes: list[QCheckBox] = checks) -> None:
+                                mark_change(key, [box.property("configValue") for box in boxes if box.isChecked()], True)
+
+                            for checkbox in checks:
+                                checkbox.toggled.connect(update_list)
+                        elif spec.value_type == "boolean" and "list" not in spec.allowed_types and (
+                            not spec.choices or set(spec.choices) == {True, False}
+                        ):
+                            control = QCheckBox(tr("Enabled", "Aktif"))
+                            control.setObjectName(f"siteOptionCheck_{spec.key}")
+                            control.setChecked(bool(saved[0] if saved else current))
+                            control.toggled.connect(
+                                lambda checked, key=spec.key: mark_change(key, checked, True)
+                            )
+                        elif spec.choices and "list" not in spec.allowed_types and "object" not in spec.allowed_types:
+                            control = QComboBox()
+                            control.setObjectName(f"siteOptionChoice_{spec.key}")
+                            choices = list(spec.choices)
+                            choice_descriptions = spec.choice_help
+                            if category == "instagram" and spec.key == "videos":
+                                choice_descriptions = {key: tr(*description) for key, description in _INSTAGRAM_VIDEO_HELP.items()}
+                                if hint:
+                                    hint.setText(tr("Choose how videos are downloaded. The selected mode is explained below.", "Pilih cara mengunduh video. Mode terpilih dijelaskan di bawah."))
+                            selected = saved[0] if saved else current
+                            if selected not in choices:
+                                choices.insert(0, selected)
+                            for choice in choices:
+                                if beginner_mode and isinstance(choice, bool):
+                                    choice_label = tr("Enabled", "Aktif") if choice else tr("Disabled", "Nonaktif")
+                                elif beginner_mode and isinstance(choice, str):
+                                    choice_label = choice.replace("-", " ").capitalize()
+                                else:
+                                    choice_label = config_value_text(choice) or "null"
+                                control.addItem(choice_label, choice)
+                                control.setItemData(control.count() - 1, choice_descriptions.get(json.dumps(choice, ensure_ascii=False), ""), Qt.ToolTipRole)
+                            control.setCurrentIndex(max(0, control.findData(selected)))
+                            control.currentIndexChanged.connect(
+                                lambda _index, key=spec.key, picker=control: mark_change(
+                                    key, picker.currentData(), True
+                                )
+                            )
+                            choice_hint = QLabel()
+                            choice_hint.setWordWrap(True)
+                            def describe_choice(_index: int = 0, picker: QComboBox = control, label: QLabel = choice_hint,
+                                                descriptions: dict = choice_descriptions) -> None:
+                                selected = picker.currentData()
+                                help_text = descriptions.get(json.dumps(selected, ensure_ascii=False), "")
+                                label.setText(str(picker.currentText()) + (" — " + help_text if help_text else ""))
+                            control.currentIndexChanged.connect(describe_choice)
+                            describe_choice()
+                            field_l.addWidget(choice_hint)
+                        elif not spec.sensitive and (spec.value_type == "json" or "list" in spec.allowed_types or isinstance(current, (list, dict))):
+                            types = spec.allowed_types or (("object",) if isinstance(spec.default, dict) else ("list",))
+                            control = StructuredConfigEditor(
+                                parse_typed_config_value, indonesian=ind, allowed_types=types,
+                                string_items=spec.string_items or spec.key in {"archive-pragma", "extension-map"},
+                                item_choices=spec.choices or spec.suggestions, example=config_example_value(spec.example) or ({"jpeg": "jpg"} if spec.key == "extension-map" else None),
+                                hint=tr(*_STARTER_OPTION_HELP[spec.key]) if spec.key in _STARTER_OPTION_HELP and (spec.key != "previews" or category == "instagram") else spec.description,
+                                name_hint="jpeg" if spec.key == "extension-map" else "",
+                                value_hint="jpg" if spec.key == "extension-map" else "journal_mode=WAL" if spec.key == "archive-pragma" else "",
+                                allow_default_key=spec.key in {"directory", "filename"},
+                            )
+                            if hint:
+                                hint.hide()
+                            control.setObjectName(f"siteOptionStructured_{spec.key}")
+                            if spec.key == "extension-map":
+                                control.table.setHorizontalHeaderLabels([tr("Original extension", "Ekstensi asal"), tr("Value type", "Jenis nilai"), tr("Replacement", "Pengganti")])
+                            elif spec.key in {"directory", "filename"}:
+                                control.table.setHorizontalHeaderLabels([tr("Condition (blank = otherwise)", "Kondisi (kosong = jika lainnya tidak cocok)"), tr("Value type", "Jenis nilai"), tr("Folder / filename pattern", "Pola folder / nama file")])
+                                control.help.setText(tr("Conditional patterns: keep one blank condition for the fallback. Each value is the folder list or filename to use when its condition matches. Conditions are saved without being evaluated here.", "Pola bersyarat: satu kondisi kosong menjadi pilihan jika lainnya tidak cocok. Nilai berisi daftar folder atau nama file saat kondisi cocok. Kondisi disimpan tanpa dievaluasi di sini."))
+                            value = saved[0] if saved else current
+                            if saved and not saved[1] and isinstance(value, dict) and "rows" in value:
+                                control.set_snapshot(value)
+                            else:
+                                control.set_value(value if value is not None else {} if types == ("object",) else [])
+                        else:
+                            control = QLineEdit()
+                            control.setObjectName(f"siteOptionValue_{spec.key}")
+                            control.setText(str(saved[0]) if saved else (
+                                "" if spec.sensitive else config_value_text(current)
+                            ))
+                            if spec.sensitive:
+                                control.setEchoMode(QLineEdit.Password)
+                                control.setPlaceholderText(tr(
+                                    "Enter replacement (stored value hidden)",
+                                    "Masukkan pengganti (nilai lama tersembunyi)",
+                                ))
+                            else:
+                                control.setPlaceholderText(tr("Enter a value", "Masukkan nilai"))
+                        control.setToolTip(spec.description)
+                        editor_row.addWidget(control, 1)
+                        if isinstance(control, QLineEdit) and spec.key in {"base-directory", "archive"}:
+                            browse_button = QPushButton(tr("Browse…", "Pilih…"))
+                            browse_button.setObjectName(f"siteOptionBrowse_{spec.key}")
+
+                            def browse_path(_checked: bool = False, key: str = spec.key,
+                                            target: QLineEdit = control) -> None:
+                                if key == "archive":
+                                    chosen, _ = QFileDialog.getSaveFileName(
+                                        studio, tr("Choose download history file", "Pilih file riwayat unduhan"),
+                                        target.text(), "SQLite (*.sqlite3 *.sqlite *.db);;All files (*.*)",
+                                    )
+                                else:
+                                    chosen = QFileDialog.getExistingDirectory(
+                                        studio, tr("Choose download folder", "Pilih folder unduhan"),
+                                        target.text(),
+                                    )
+                                if chosen:
+                                    target.setText(chosen)
+
+                            browse_button.clicked.connect(browse_path)
+                            editor_row.addWidget(browse_button)
+                        remove_button = QPushButton(tr("Use default", "Pakai bawaan"))
+                        remove_button.setObjectName(f"removeSiteOption_{spec.key}")
+                        remove_button.setToolTip(tr(
+                            "Undo this website's custom value.",
+                            "Batalkan nilai khusus untuk situs ini.",
+                        ))
+                        remove_button.setEnabled(explicit or saved is not None)
+                        editor_row.addWidget(remove_button)
+                        field_l.addLayout(editor_row)
+                        acknowledge = None
+                        if spec.sensitive or isinstance(control, StructuredConfigEditor):
+                            acknowledge = QCheckBox(tr(
+                                "Allow plain-text storage", "Izinkan penyimpanan teks biasa",
+                            ))
+                            acknowledge.setObjectName(f"siteOptionAcknowledge_{spec.key}")
+                            acknowledge.setChecked(bool(saved and saved[2]))
+                            acknowledge.toggled.connect(
+                                lambda checked, key=spec.key: pending.__setitem__(
+                                    key, (pending[key][0], pending[key][1], checked)
+                                ) if key in pending else None
+                            )
+                            field_l.addWidget(acknowledge)
+                            if isinstance(control, StructuredConfigEditor):
+                                def show_secret_ack(editor: StructuredConfigEditor = control, box: QCheckBox = acknowledge) -> None:
+                                    try:
+                                        sensitive_value = contains_config_secrets(editor.value())
+                                    except ValueError:
+                                        sensitive_value = editor.kind.currentData() == "object" and any(
+                                            is_sensitive_option_key(row[0]) for row in editor.snapshot()["rows"]
+                                        )
+                                    box.setVisible(sensitive_value)
+                                control.valueChanged.connect(show_secret_ack)
+                                show_secret_ack()
+                        if isinstance(control, QLineEdit):
+                            control.textChanged.connect(
+                                lambda value, key=spec.key, ack_box=acknowledge: mark_change(
+                                    key, value, False, bool(ack_box and ack_box.isChecked())
+                                )
+                            )
+                            if spec.key == "filename":
+                                name_preview = QLabel()
+                                name_preview.setTextFormat(Qt.PlainText)
+                                name_preview.setWordWrap(True)
+                                name_preview.setObjectName("siteFilenameExample")
+                                def preview_name(_text: str = "", target: QLineEdit = control, label: QLabel = name_preview) -> None:
+                                    try:
+                                        example = filename_example(target.text(), category)
+                                        label.setText(tr("Example with sample data: ", "Contoh dengan data ilustrasi: ") + example)
+                                    except ValueError:
+                                        label.setText(tr("Advanced pattern preserved. Actual file names depend on this website's metadata.", "Pola lanjutan dipertahankan. Nama file sebenarnya mengikuti metadata situs ini."))
+                                control.textChanged.connect(preview_name)
+                                preview_name()
+                                field_l.addWidget(name_preview)
+                        elif isinstance(control, StructuredConfigEditor):
+                            def update_structured(key: str = spec.key, editor: StructuredConfigEditor = control,
+                                                  ack_box: QCheckBox | None = acknowledge) -> None:
+                                mark_change(key, editor.snapshot(), False, bool(ack_box and ack_box.isChecked()))
+
+                            control.valueChanged.connect(update_structured)
+
+                        def remove_value(_checked: bool = False, key: str = spec.key) -> None:
+                            pending.pop(key, None)
+                            block = site_overrides.get(category)
+                            if block is not None:
+                                block.pop(key, None)
+                                if not block:
+                                    site_overrides.pop(category, None)
+                            site_removals.setdefault(category, set()).add(key)
+                            scope.setCurrentIndex(scope.findData("config"))
+                            refresh_preview()
+                            update_studio_preview()
+                            reload_site_options()
+                            reload_config_options()
+
+                        remove_button.clicked.connect(remove_value)
+                        wide = isinstance(control, StructuredConfigEditor) or len(group_specs) == 1
+                        if wide and field_column:
+                            field_row += 1
+                            field_column = 0
+                        fields.addWidget(field, field_row, field_column, 1, 2 if wide else 1, Qt.AlignTop)
+                        if wide or field_column:
+                            field_row += 1
+                            field_column = 0
+                        else:
+                            field_column = 1
+                    card_l.addLayout(fields)
+                    site_options_cards.addWidget(card)
+
+                if not specific and not needle:
+                    note = QLabel(tr(
+                        "This website uses the common download settings below.",
+                        "Situs ini memakai pengaturan unduhan umum di bawah.",
+                    ))
+                    note.setWordWrap(True)
+                    site_options_cards.addWidget(note)
+                if beginner_mode:
+                    if specific:
+                        add_group(tr("What to download", "Apa yang diunduh"), specific)
+                    if shared:
+                        add_group(tr("Saving and reliability", "Penyimpanan dan keandalan"), shared)
+                else:
+                    for section, entries in (
+                        (tr("Website options", "Opsi situs"), specific),
+                        (tr("Other settings for this website", "Pengaturan lain untuk situs ini"), shared),
+                    ):
+                        for group in dict.fromkeys(spec.group for spec in entries):
+                            add_group(f"{section} · {group}", [spec for spec in entries if spec.group == group])
+                if not matching:
+                    site_options_cards.addWidget(QLabel(tr(
+                        "No matching options.", "Tidak ada opsi yang cocok.",
+                    )))
+                for editor in guided_path_widgets:
+                    site_options_cards.addWidget(editor)
+                site_options_cards.addStretch(1)
+
+            def apply_generated_site_options(category: str | None = None) -> bool:
+                failed_key = ""
+                try:
+                    category = category or normalized_site(site_options_site)
+                    pending = site_options_pending.get(category, {})
+                    if not pending:
+                        return True
+                    specs = {spec.key: spec for spec in site_form_specs(category)}
+                    block: dict[str, object] = {}
+                    for key, (raw, parsed, acknowledged) in pending.items():
+                        failed_key = key
+                        spec = specs[key]
+                        if spec.sensitive and (not raw or not acknowledged):
+                            raise ValueError(tr(
+                                f"Enter {friendly_option_name(key)} and confirm plain-text storage.",
+                                f"Masukkan {friendly_option_name(key)} dan konfirmasikan penyimpanan teks biasa.",
+                            ))
+                        try:
+                            block[key] = raw if parsed else PathRulesEditor.parse_snapshot(raw) if isinstance(raw, dict) and raw.get("path_rule_form") is True else StructuredConfigEditor.parse_snapshot(
+                                raw, parse_typed_config_value
+                            ) if isinstance(raw, dict) and "rows" in raw else parse_typed_config_value(str(raw), spec.value_type)
+                            if contains_config_secrets(block[key]) and not acknowledged:
+                                raise ValueError(tr("Confirm plain-text storage first.", "Konfirmasikan penyimpanannya dalam teks biasa."))
+                        except ValueError as exc:
+                            raise ValueError(f"{friendly_option_name(key)}: {exc}") from exc
+                except (KeyError, ValueError) as exc:
+                    if category in site_names:
+                        site_options_site.setCurrentIndex(site_options_site.findText(category))
+                    studio_tabs.setCurrentWidget(site_options_page)
+                    if failed_key:
+                        failed_edit = site_options_pending.get(category, {}).get(failed_key)
+                        if failed_edit and isinstance(failed_edit[0], dict) and failed_edit[0].get("path_rule_form") is True:
+                            site_options_search.clear()
+                            site_options_goal.setCurrentIndex(site_options_goal.findData("paths"))
+                            reload_site_options()
+                        else:
+                            site_options_search.setText(failed_key)
+                    self.show_compact_message(tr("Check this setting", "Periksa pengaturan ini"), str(exc), "warning")
+                    return False
+                merge_override(category, block)
+                pending.clear()
+                reload_site_options()
+                reload_config_options()
+                return True
 
             def selected_config_spec() -> ConfigOptionSpec | None:
                 category = selected_config_category()
@@ -3020,6 +4164,16 @@ class ComposerMixin:
                 try:
                     category = selected_config_category()
                 except ValueError:
+                    config_option_key.blockSignals(True)
+                    config_option_key.clear()
+                    config_option_key.blockSignals(False)
+                    config_option_table.setRowCount(0)
+                    option_description.setText(tr(
+                        "Choose a site from the suggestions to see its options.",
+                        "Pilih situs dari saran untuk melihat opsinya.",
+                    ))
+                    config_option_apply.setEnabled(False)
+                    config_option_remove.setEnabled(False)
                     return
                 config_site.setEnabled(bool(category))
                 specs = config_option_definitions(category)
@@ -3182,116 +4336,6 @@ class ComposerMixin:
                     return
                 merge_override(category, block)
 
-            def apply_reddit() -> None:
-                block = reddit_site_options(reddit_client_id.text(), reddit_user_agent.text())
-                if not block:
-                    self.show_compact_message("Reddit", tr("Enter at least one Reddit setting.", "Masukkan minimal satu pengaturan Reddit."), "warning")
-                    return
-                merge_override("reddit", block)
-                reddit_client_id.clear()
-
-            def load_reddit() -> None:
-                extractor = proposed_config().get("extractor", {})
-                block = extractor.get("reddit", {}) if isinstance(extractor, dict) else {}
-                if not isinstance(block, dict):
-                    block = {}
-                reddit_user_agent.setText(str(block.get("user-agent-oauth") or ""))
-                if block.get("client-id"):
-                    reddit_client_id.setPlaceholderText(tr(
-                        "An existing client ID is stored; blank keeps it",
-                        "Client ID lama sudah tersimpan; kosong mempertahankannya",
-                    ))
-
-            def toggle_pixiv_secrets(visible: bool) -> None:
-                echo = QLineEdit.Normal if visible else QLineEdit.Password
-                pixiv_refresh_token.setEchoMode(echo)
-                pixiv_phpsessid.setEchoMode(echo)
-
-            def apply_pixiv() -> None:
-                block = pixiv_site_options(
-                    include=[key for key, checkbox in pixiv_include.items() if checkbox.isChecked()],
-                    metadata=pixiv_metadata.isChecked(),
-                    metadata_bookmark=pixiv_metadata_bookmark.isChecked(),
-                    captions=pixiv_captions.isChecked(),
-                    comments=pixiv_comments.isChecked(),
-                    tags=pixiv_tags.currentText(),
-                    ugoira=pixiv_ugoira.currentData(),
-                )
-                novel_block = pixiv_novel_options(
-                    embeds=pixiv_embeds.isChecked(),
-                    covers=pixiv_covers.isChecked(),
-                    full_series=pixiv_full_series.isChecked(),
-                    metadata=pixiv_novel_metadata.isChecked(),
-                    metadata_bookmark=pixiv_novel_metadata_bookmark.isChecked(),
-                    comments=pixiv_novel_comments.isChecked(),
-                    tags=pixiv_novel_tags.currentText(),
-                )
-                refresh_value = pixiv_refresh_token.text()
-                cookie_value = pixiv_phpsessid.text()
-                if (refresh_value or cookie_value) and not pixiv_secret_ack.isChecked():
-                    self.show_compact_message(
-                        "Pixiv",
-                        tr("Confirm the plain-text credential warning first.", "Konfirmasikan peringatan credential teks biasa terlebih dahulu."),
-                        "warning",
-                    )
-                    return
-                if refresh_value:
-                    block["refresh-token"] = refresh_value
-                if cookie_value:
-                    block["cookies"] = {"PHPSESSID": cookie_value}
-                merge_override("pixiv", block)
-                # Older builder versions wrote novel-only keys into pixiv.
-                # Move them into the documented pixiv-novel category on save.
-                site_removals.setdefault("pixiv", set()).update({"embeds", "covers", "full-series"})
-                merge_override("pixiv-novel", novel_block)
-                pixiv_refresh_token.clear()
-                pixiv_phpsessid.clear()
-                pixiv_secret_ack.setChecked(False)
-
-            def load_pixiv() -> None:
-                extractor = proposed_config().get("extractor", {})
-                block = extractor.get("pixiv", {}) if isinstance(extractor, dict) else {}
-                if not isinstance(block, dict):
-                    block = {}
-                novel_block = extractor.get("pixiv-novel", {}) if isinstance(extractor, dict) else {}
-                if not isinstance(novel_block, dict):
-                    novel_block = {}
-                included = block.get("include", ["artworks"])
-                if isinstance(included, str):
-                    included = [included]
-                included_set = {
-                    str(item).strip().lower()
-                    for item in included
-                } if isinstance(included, list) else set()
-                for key, checkbox in pixiv_include.items():
-                    checkbox.setChecked(key in included_set)
-                pixiv_embeds.setChecked(bool(novel_block.get("embeds", block.get("embeds", False))))
-                pixiv_covers.setChecked(bool(novel_block.get("covers", block.get("covers", False))))
-                pixiv_full_series.setChecked(bool(novel_block.get("full-series", block.get("full-series", False))))
-                pixiv_metadata.setChecked(bool(block.get("metadata", False)))
-                pixiv_metadata_bookmark.setChecked(bool(block.get("metadata-bookmark", False)))
-                pixiv_captions.setChecked(bool(block.get("captions", False)))
-                pixiv_comments.setChecked(bool(block.get("comments", False)))
-                pixiv_tags.setCurrentText(str(block.get("tags", "japanese")))
-                pixiv_novel_metadata.setChecked(bool(novel_block.get("metadata", False)))
-                pixiv_novel_metadata_bookmark.setChecked(bool(novel_block.get("metadata-bookmark", False)))
-                pixiv_novel_comments.setChecked(bool(novel_block.get("comments", False)))
-                pixiv_novel_tags.setCurrentText(str(novel_block.get("tags", "japanese")))
-                ugoira_value = block.get("ugoira", True)
-                ugoira_index = pixiv_ugoira.findData(ugoira_value)
-                pixiv_ugoira.setCurrentIndex(max(0, ugoira_index))
-                if block.get("refresh-token"):
-                    pixiv_refresh_token.setPlaceholderText(tr(
-                        "An existing refresh token is stored; blank keeps it",
-                        "Refresh token lama sudah tersimpan; kosong mempertahankannya",
-                    ))
-                cookies = block.get("cookies", {})
-                if isinstance(cookies, dict) and cookies.get("PHPSESSID"):
-                    pixiv_phpsessid.setPlaceholderText(tr(
-                        "An existing PHPSESSID is stored; blank keeps it",
-                        "PHPSESSID lama sudah tersimpan; kosong mempertahankannya",
-                    ))
-
             def update_advanced_visibility(*_args) -> None:
                 sensitive = is_sensitive_option_key(advanced_key.text().strip())
                 advanced_show.setVisible(sensitive)
@@ -3321,6 +4365,8 @@ class ComposerMixin:
             def discard_draft() -> None:
                 general_overrides.clear()
                 site_overrides.clear()
+                site_options_pending.clear()
+                reference_pending.clear()
                 general_removals.clear()
                 site_removals.clear()
                 path_overrides.clear()
@@ -3328,46 +4374,106 @@ class ComposerMixin:
                 refresh_preview()
                 update_studio_preview()
                 reload_config_options()
+                reload_site_options()
                 reload_reference()
+
+            def sync_site_option_picker(text: str, target: QComboBox) -> None:
+                category = text.strip().lower()
+                if category in site_names and target.currentText() != category:
+                    target.setCurrentIndex(target.findText(category))
 
             site_archive_browse.clicked.connect(browse_site_archive)
             archive_load.clicked.connect(load_archive)
             archive_apply.clicked.connect(apply_archive)
-            reddit_show.toggled.connect(
-                lambda checked: reddit_client_id.setEchoMode(QLineEdit.Normal if checked else QLineEdit.Password)
-            )
-            reddit_apply.clicked.connect(apply_reddit)
-            pixiv_show.toggled.connect(toggle_pixiv_secrets)
-            pixiv_apply.clicked.connect(apply_pixiv)
             advanced_key.textChanged.connect(update_advanced_visibility)
             advanced_show.toggled.connect(update_advanced_visibility)
             advanced_apply.clicked.connect(apply_advanced)
             reset_draft.clicked.connect(discard_draft)
             config_scope.currentIndexChanged.connect(reload_config_options)
-            config_site.currentIndexChanged.connect(reload_config_options)
+            config_site.currentTextChanged.connect(reload_config_options)
+            config_site.currentTextChanged.connect(
+                lambda value: sync_site_option_picker(value, site_options_site)
+            )
+            site_options_site.currentTextChanged.connect(reload_site_options)
+            site_options_site.currentTextChanged.connect(
+                lambda value: sync_site_option_picker(value, config_site)
+            )
+            site_options_search.textChanged.connect(reload_site_options)
+            site_options_show_all.toggled.connect(reload_site_options)
+            def choose_site_goal() -> None:
+                if site_options_goal.currentData() == "after":
+                    studio_tabs.setCurrentWidget(postprocessor_editor)
+                    return
+                site_options_search.clear()
+                site_options_show_all.setChecked(False)
+                reload_site_options()
+            site_options_goal.currentIndexChanged.connect(choose_site_goal)
+            site_options_apply.clicked.connect(lambda _checked=False: apply_generated_site_options())
             config_option_search.textChanged.connect(reload_config_options)
             config_option_key.currentIndexChanged.connect(configure_config_option)
             config_option_table.cellClicked.connect(choose_table_option)
             config_option_show.toggled.connect(toggle_config_secret)
             config_option_apply.clicked.connect(apply_config_option)
             config_option_remove.clicked.connect(remove_config_option)
-            studio_tabs.currentChanged.connect(
-                lambda index: load_pixiv() if studio_tabs.tabText(index) == "Pixiv" else None
-            )
+            def visit_studio_tab(index: int) -> None:
+                if studio_tabs.widget(index) is site_options_page:
+                    reload_site_options()
+                elif studio_tabs.widget(index) is draft_page:
+                    apply_pending_site_options()
+                    update_studio_preview()
+                elif studio_tabs.widget(index) is postprocessor_editor:
+                    if apply_pending_site_options():
+                        category = site_options_site.currentText().strip().lower()
+                        if category in site_names and postprocessor_editor.property("sourceSite") != category:
+                            postprocessor_editor.site.setCurrentIndex(postprocessor_editor.site.findData(category))
+                            postprocessor_editor.setProperty("sourceSite", category)
+                        postprocessor_editor.reload()
+
+            studio_tabs.currentChanged.connect(visit_studio_tab)
 
             footer = QHBoxLayout()
             footer.addStretch(1)
-            done = QPushButton(tr("Done", "Selesai"))
+            done = QPushButton(tr("Keep draft & return", "Simpan draf & kembali"))
             done.setObjectName("siteConfigDone")
-            done.clicked.connect(studio.accept)
+            done.setToolTip(tr(
+                "Keep changes in this Config Maker draft. Save config writes them to your file.",
+                "Pertahankan perubahan dalam draf Pembuat Config ini. Simpan config menulisnya ke file.",
+            ))
+
+            def apply_pending_site_options() -> bool:
+                if not apply_pending_reference_options():
+                    return False
+                for category, pending in list(site_options_pending.items()):
+                    if pending and not apply_generated_site_options(category):
+                        return False
+                return True
+
+            def finish_site_studio() -> None:
+                if apply_pending_site_options():
+                    studio.accept()
+
+            def save_site_config() -> None:
+                if apply_pending_site_options() and write_config(
+                    self.config_path or detect_config_path() or str(APP_DIR / "config.json")
+                ):
+                    studio.accept()
+
+            done.clicked.connect(finish_site_studio)
             footer.addWidget(done)
+            save_config = QPushButton(tr("Save config", "Simpan config"))
+            save_config.setObjectName("siteConfigSave")
+            save_config.setToolTip(tr(
+                "Save this Config Maker draft and changes for every website to the file shown above.",
+                "Simpan draf Pembuat Config dan perubahan seluruh situs ke file yang tertera di atas.",
+            ))
+            save_config.clicked.connect(save_site_config)
+            footer.addWidget(save_config)
             studio_l.addLayout(footer)
             update_advanced_visibility()
             load_archive()
-            load_reddit()
-            load_pixiv()
             update_studio_preview()
             reload_config_options()
+            reload_site_options()
             studio.exec()
 
         def browse_folder() -> None:
@@ -3487,7 +4593,14 @@ class ComposerMixin:
                 oauth_instance.text(),
             )
             base = command_string_to_argv(self.gdl_cmd or "gallery-dl")
-            return (base or ["gallery-dl"]) + ["-o", "extractor.input=true", oauth_target]
+            parts: list[str] = []
+            if self.config_path:
+                config = safe_expand_path(self.config_path)
+                if config.is_file():
+                    parts.extend(["--config", str(config)])
+            return insert_gallery_dl_arguments(
+                base or ["gallery-dl"], parts + ["-o", "extractor.input=true", oauth_target]
+            )
 
         def oauth_command_text() -> str:
             return " ".join(quote_arg_for_preview(part) for part in oauth_parts())
@@ -3637,7 +4750,7 @@ class ComposerMixin:
             )
             if answer != QMessageBox.Yes:
                 return
-            target = Path(self.config_path or detect_config_path() or str(APP_DIR / "config.json")).expanduser()
+            target = safe_expand_path(self.config_path or detect_config_path() or str(APP_DIR / "config.json"))
             try:
                 cleaned = copy.deepcopy(existing_config)
                 if not isinstance(cleaned.get("extractor"), dict):
@@ -3706,22 +4819,55 @@ class ComposerMixin:
                 checkbox.setVisible(not needle or needle in key.lower() or needle in checkbox.text().lower())
 
         def ensure_urls() -> bool:
-            state = current_state()
-            if not state.urls:
+            validated = []
+            for index, line in enumerate(urls.toPlainText().splitlines(), 1):
+                if not line.strip():
+                    continue
+                try:
+                    target, _ = validate_supported_url(line)
+                except ValueError as exc:
+                    self.show_compact_message(tr("Check your links", "Periksa tautan Anda"),
+                                              (f"Baris {index}: " if ind else f"Line {index}: ") + str(exc), "warning")
+                    return False
+                if target not in validated:
+                    validated.append(target)
+            if not config_only:
+                active_inputs = guided_builder.batch_input.toPlainText().strip() if guided_builder.batch.isChecked() else any(field.text().strip() for field in guided_builder.inputs if not field.isHidden())
+                if active_inputs:
+                    try:
+                        for target in guided_builder.generated_links():
+                            if target not in validated:
+                                validated.append(target)
+                    except ValueError as exc:
+                        self.show_compact_message(tr("Check your links", "Periksa tautan Anda"), str(exc), "warning")
+                        return False
+            if not validated:
                 self.show_compact_message(tr("Download Composer", "Perancang Download"), tr("Add at least one URL.", "Tambahkan minimal satu URL."), "warning")
                 return False
-            invalid = [target for target in state.urls if target.startswith("-") or any(char.isspace() for char in target)]
-            if invalid:
-                self.show_compact_message(
-                    tr("Invalid URL", "URL tidak valid"),
-                    tr("Each URL must be on one line and cannot begin with an option flag.", "Setiap URL harus berada di satu baris dan tidak boleh diawali flag opsi."),
-                    "warning",
-                )
-                return False
+            urls.setPlainText("\n".join(validated))
             return True
 
         def add_to_queue() -> None:
+            if self.active_workers > 0:
+                self.show_compact_message("Download Composer", "Wait for the current download to finish before changing the queue.", "info")
+                return
             if not ensure_urls():
+                return
+
+            def queue_candidate() -> tuple[list[str], str] | None:
+                lines = command_lines()
+                current = self.txt_commands.toPlainText().strip()
+                combined = "\n".join(lines)
+                candidate = f"{current}\n{combined}".strip() if current else combined
+                try:
+                    parse_text_database(candidate)
+                except ValueError as exc:
+                    self.show_compact_message("Download Composer", str(exc), "error")
+                    return None
+                return lines, candidate
+
+            proposed_queue = queue_candidate()
+            if proposed_queue is None:
                 return
             state = current_state()
             if state.cookies_file:
@@ -3748,20 +4894,28 @@ class ComposerMixin:
                 )
                 if answer != QMessageBox.Yes or not write_config(self.config_path or detect_config_path() or str(APP_DIR / "config.json")):
                     return
-            lines = command_lines()
-            current = self.txt_commands.toPlainText().strip()
-            combined = "\n".join(lines)
-            self.txt_commands.setPlainText(f"{current}\n{combined}".strip() if current else combined)
+                proposed_queue = queue_candidate()
+                if proposed_queue is None:
+                    return
+            lines, candidate = proposed_queue
+            self.txt_commands.setPlainText(candidate)
+            self._rebuild_from_text()
             self.append_log(f"[composer] appended {len(lines)} job(s) to input")
             self.show_compact_message(tr("Download Composer", "Perancang Download"), tr(f"Added {len(lines)} job(s) to the queue input.", f"{len(lines)} job ditambahkan ke input antrean."), "info")
+            dlg.accept()
 
         def copy_commands() -> None:
+            if not ensure_urls():
+                return
             QApplication.clipboard().setText("\n".join(command_lines()))
             self.show_compact_message(tr("Download Composer", "Perancang Download"), tr("Command copied.", "Command disalin."), "info")
 
         def write_config(path: str) -> bool:
-            nonlocal existing_config, config_error
-            target = Path(path).expanduser()
+            nonlocal existing_config, config_error, loaded_state, preserve_source
+            if self.active_workers > 0:
+                self.show_compact_message("Download Composer", "Wait for the current download to finish before changing the config.", "info")
+                return False
+            target = safe_expand_path(path)
             try:
                 state = current_state()
                 if state.cookies_file:
@@ -3824,8 +4978,10 @@ class ComposerMixin:
                 self.config_path = str(target)
                 config_path_label.setText(str(target))
                 if active_path is not None:
-                    active_path.setText(tr("Config path: ", "Path config: ") + str(target))
+                    active_path.setText(tr("Config file: ", "File config: ") + str(target))
                 existing_config = data
+                preserve_source = True
+                loaded_state = copy.deepcopy(current_state())
                 config_error = None
                 general_overrides.clear()
                 site_overrides.clear()
@@ -3856,6 +5012,50 @@ class ComposerMixin:
             if path:
                 write_config(path)
 
+        def load_config_example(selected: str) -> None:
+            nonlocal existing_config, config_error, loaded_state, preserve_source
+            if not selected:
+                return
+            imported, error = _read_json_config(selected, required=True)
+            if error:
+                self.show_compact_message(tr("Cannot read config", "Config tidak bisa dibaca"), str(error) + tr("\nThe current draft is unchanged.", "\nPeriksa koma dan tanda petik pada baris tersebut. Draft saat ini tetap utuh."), "warning")
+                return
+            existing_config, config_error, loaded_state = imported, None, None
+            preserve_source = True
+            general_overrides.clear()
+            site_overrides.clear()
+            general_removals.clear()
+            site_removals.clear()
+            path_overrides.clear()
+            path_removals.clear()
+            _set_checks(site_checks, set(), lambda: None)
+            destination.clear()
+            directory.clear()
+            filename.clear()
+            archive_path.clear()
+            auth_username.clear()
+            secret_value.clear()
+            extra_auth_value.clear()
+            apply_loaded_defaults()
+            update_auth_method()
+            loaded_state = copy.deepcopy(current_state())
+            refresh_preview()
+            self.show_compact_message(tr("Config loaded as a draft", "Config dimuat sebagai draft"), tr(
+                "The original values are preserved until you edit them. Choose a website to edit its settings; use Save As for a separate copy.",
+                "Nilai asli dipertahankan sampai Anda mengeditnya. Pilih situs untuk mengatur nilainya; gunakan Simpan Sebagai untuk salinan terpisah.",
+            ), "info")
+
+        if import_config_button is not None:
+            def import_config() -> None:
+                selected, _ = QFileDialog.getOpenFileName(
+                    dlg, tr("Choose a config to use as a starting point", "Pilih config untuk dijadikan contoh"),
+                    "", "JSON config (*.json *.conf);;All files (*.*)",
+                )
+                load_config_example(selected)
+            import_config_button.clicked.connect(import_config)
+        if load_example_button is not None:
+            load_example_button.clicked.connect(lambda: load_config_example(str(next(item.path for item in EXAMPLES if item.key == config_example_picker.currentData()))))
+
         browse_destination.clicked.connect(browse_folder)
         browse_cookies.clicked.connect(browse_cookie_file)
         browse_archive.clicked.connect(browse_archive_file)
@@ -3878,6 +5078,20 @@ class ComposerMixin:
         dlg.finished.connect(cleanup_oauth)
         site_search.textChanged.connect(filter_sites)
         site_config_button.clicked.connect(open_site_config_studio)
+        def open_saved_website_settings(site: str) -> None:
+            nonlocal existing_config, config_error, preserve_source
+            # Open the saved-config workspace with its own draft. Job fields
+            # must never leak into the config through this shortcut.
+            self.open_config_builder(site)
+            existing_path = self.config_path or detect_config_path()
+            existing_config, config_error = _read_json_config(existing_path)
+            preserve_source = bool(existing_path) and config_error is None
+            config_path_label.setText(str(existing_path or ""))
+            refresh_preview()
+
+        guided_builder.configureRequested.connect(open_saved_website_settings)
+        if config_start_button is not None:
+            config_start_button.clicked.connect(open_site_config_studio)
         select_common.clicked.connect(lambda: _set_checks(site_checks, {"pixiv", "twitter", "instagram", "reddit", "deviantart", "danbooru", "gelbooru"}, refresh_preview))
         select_none.clicked.connect(lambda: _set_checks(site_checks, set(), refresh_preview))
 
@@ -3910,13 +5124,13 @@ class ComposerMixin:
         add_button = QPushButton(tr("Add to Queue", "Tambah ke Antrean"))
         add_button.setObjectName("primary")
         copy_button = QPushButton(tr("Copy Command", "Salin Command"))
-        save_button = QPushButton(tr("Save Defaults", "Simpan Default"))
+        save_button = QPushButton(tr("Save config file", "Simpan file config") if config_only else tr("Save Defaults", "Simpan Default"))
         save_as_button = QPushButton(tr("Save As...", "Simpan Sebagai..."))
         close_button = QPushButton(tr("Close", "Tutup"))
         for button in (add_button, copy_button, save_button, save_as_button, close_button):
             button.setMinimumHeight(32)
         button_row.addWidget(add_button)
-        button_row.addWidget(copy_button)
+        preview_l.addWidget(copy_button, 0, Qt.AlignRight)
         button_row.addStretch(1)
         button_row.addWidget(save_button)
         button_row.addWidget(save_as_button)
@@ -3938,11 +5152,26 @@ class ComposerMixin:
             tabs.setTabVisible(tabs.indexOf(guide_scroll), False)
             tabs.setTabText(tabs.indexOf(main_scroll), tr("Defaults", "Default"))
             preview_tabs.setTabVisible(0, False)
-            preview_tabs.setCurrentWidget(config_preview)
+            preview_tabs.setCurrentWidget(config_summary)
+            tabs.setCurrentWidget(start_scroll)
+        else:
+            save_button.hide()
+            save_as_button.hide()
+            scope.hide()
+            tabs.setTabVisible(tabs.indexOf(guide_scroll), False)
+            preview_tabs.setTabVisible(preview_tabs.indexOf(config_preview), False)
+            tabs.setTabText(tabs.indexOf(main_scroll), tr("1. Links and destination", "1. Tautan dan tujuan"))
+            tabs.setTabText(tabs.indexOf(advanced_scroll), tr("2. Options for these jobs", "2. Opsi untuk job ini"))
+            tabs.setTabText(tabs.indexOf(auth_scroll), tr("Login for these jobs", "Login untuk job ini"))
             tabs.setCurrentWidget(main_scroll)
+        # Preset site toggles duplicated the Config Maker website forms.
+        tabs.setTabVisible(tabs.indexOf(sites_page), False)
         update_auth_method()
         sync_auth_site_from_oauth()
+        loaded_state = copy.deepcopy(current_state())
         refresh_preview()
+        if config_only and preferred_site:
+            QTimer.singleShot(0, lambda: open_site_config_studio(preferred_site))
         dlg.exec()
 
 

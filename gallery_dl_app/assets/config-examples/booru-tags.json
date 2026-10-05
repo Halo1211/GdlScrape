@@ -1,0 +1,6 @@
+{
+  "#": "Adapted from https://github.com/mikf/gallery-dl/blob/v1.32.14/docs/gallery-dl-example.conf. Tags are written only for the listed websites.",
+  "extractor": {
+    "postprocessors": [{"name": "metadata", "mode": "tags", "whitelist": ["danbooru", "e621", "safebooru", "rule34"]}]
+  }
+}

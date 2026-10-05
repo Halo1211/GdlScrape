@@ -1,0 +1,9 @@
+{
+  "extractor": {
+    "instagram": {
+      "include": ["posts", "reels", "highlights"],
+      "videos": true,
+      "sleep-request": [5.0, 8.0]
+    }
+  }
+}

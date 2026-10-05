@@ -55,7 +55,24 @@ class SecretVault:
         if not reference:
             raise ValueError("Secret reference is required")
         if self._keyring is not None:
+            values = self._read_dpapi_values(strict=True) if self.path.exists() else {}
+            previous = self._keyring.get_password(SERVICE_NAME, reference) if reference in values else None
             self._keyring.set_password(SERVICE_NAME, reference, secret)
+            if reference in values:
+                del values[reference]
+                try:
+                    atomic_write_text(self.path, json.dumps(values, indent=2), encoding="utf-8")
+                except Exception as cleanup_error:
+                    # Keep the old profile coherent if its legacy encrypted
+                    # copy cannot be removed after updating the keyring.
+                    try:
+                        if previous is None:
+                            self._keyring.delete_password(SERVICE_NAME, reference)
+                        else:
+                            self._keyring.set_password(SERVICE_NAME, reference, previous)
+                    except Exception:
+                        raise RuntimeError("Secret update cleanup failed and keyring rollback failed") from cleanup_error
+                    raise
             return
         if os.name != "nt":
             raise RuntimeError("Install the optional 'keyring' package to store secrets securely")
@@ -72,7 +89,9 @@ class SecretVault:
         if not reference:
             return None
         if self._keyring is not None:
-            return self._keyring.get_password(SERVICE_NAME, reference)
+            secret = self._keyring.get_password(SERVICE_NAME, reference)
+            if secret is not None:
+                return secret
         if os.name != "nt":
             return None
         encoded = self._read_dpapi_values(strict=True).get(reference)
@@ -83,18 +102,17 @@ class SecretVault:
     def delete(self, reference: str) -> None:
         if not reference:
             return
+        # A profile may have used DPAPI before a keyring became available.
+        # Forgetting it must remove both copies, including a legacy encrypted
+        # value that would otherwise become readable again after a backend switch.
+        values = self._read_dpapi_values(strict=True) if self.path.exists() else {}
         if self._keyring is not None:
             # Deleting a reference that is already absent is idempotent, but a
             # real keyring/backend failure must reach the caller. Management's
             # account UI can then warn that profile metadata was removed while
             # the OS-stored secret still needs cleanup.
-            if self._keyring.get_password(SERVICE_NAME, reference) is None:
-                return
-            self._keyring.delete_password(SERVICE_NAME, reference)
-            return
-        if os.name != "nt":
-            return
-        values = self._read_dpapi_values(strict=True)
+            if self._keyring.get_password(SERVICE_NAME, reference) is not None:
+                self._keyring.delete_password(SERVICE_NAME, reference)
         if reference in values:
             del values[reference]
             atomic_write_text(self.path, json.dumps(values, indent=2), encoding="utf-8")

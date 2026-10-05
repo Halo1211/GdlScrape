@@ -8,7 +8,7 @@ import time
 import zipfile
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, Slot
+from PySide6.QtCore import QItemSelectionModel, QTimer, Slot
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QApplication,
@@ -49,6 +49,11 @@ MAX_XLSX_UNCOMPRESSED_BYTES = 128 * 1024 * 1024
 MAX_XLSX_ARCHIVE_MEMBERS = 4096
 MAX_XLSX_COLUMNS = 256
 MAX_XLSX_CELLS = 2_000_000
+QUEUE_SNAPSHOT_FIELDS = (
+    "jobs", "results", "failed_indices", "stopped_indices", "cancelled_indices",
+    "done_indices", "running_indices", "active_job_indices", "total_run",
+    "processed_run", "started_at", "_processed_in_run",
+)
 
 
 def _validate_import_record(row_number: int, *values: object) -> None:
@@ -275,6 +280,13 @@ class QueueControllerMixin:
         except ValueError as exc:
             self.show_compact_message("Queue input rejected", str(exc), "error")
             return False
+        # Preview, validation, and library import also rebuild the queue. Keep
+        # results, selections, and enabled flags when its definition is unchanged.
+        previous = [(job.raw, job.tag, job.notes) for job in getattr(self, "jobs", [])]
+        current = [(job.raw, job.tag, job.notes) for job in parsed_jobs]
+        if previous == current:
+            self.autosave_session()
+            return True
         self.jobs = parsed_jobs
         self._duplicate_count_dirty = True
         self._clear_result_state()
@@ -478,17 +490,17 @@ class QueueControllerMixin:
                         output.append(cmd)
             else:
                 first_header = (
-                    " ".join(str(header_values[0] or "").split())
+                    _row_value({"command": header_values[0]}, "command")
                     if header_values
                     else ""
                 )
-                if looks_like_database_entry(first_header):
+                if looks_like_database_entry(first_header) or first_header.startswith("#"):
                     output.append(first_header)
                 for row_number, values in enumerate(iterator, start=2):
                     _validate_import_record(row_number, *values)
                     if values:
-                        first = " ".join(str(values[0] or "").split())
-                        if first and (looks_like_database_entry(first) or not first.startswith("#")):
+                        first = _row_value({"command": values[0]}, "command")
+                        if first:
                             output.append(first)
             return "\n".join(output)
         finally:
@@ -649,6 +661,36 @@ class QueueControllerMixin:
         self.processed_run = 0
         self.started_at = None
 
+    def _capture_queue_state(self) -> dict:
+        """Preserve the manual queue while a scheduled snapshot owns the UI."""
+        state: dict = {}
+        for name in QUEUE_SNAPSHOT_FIELDS:
+            if hasattr(self, name):
+                value = getattr(self, name)
+                state[name] = value.copy() if isinstance(value, (dict, list, set)) else value
+        state["selected_indices"] = self.selected_indices()
+        return state
+
+    def _restore_queue_state(self, state: dict) -> bool:
+        if self.active_workers > 0:
+            return False
+        if hasattr(self, "_text_debounce"):
+            self._text_debounce.stop()
+        for name in QUEUE_SNAPSHOT_FIELDS:
+            if name in state:
+                setattr(self, name, state[name])
+        self._duplicate_count_dirty = True
+        self.populate_queue_table()
+        self.tbl_queue.clearSelection()
+        for index in state.get("selected_indices", []):
+            if 0 <= index < len(self.jobs):
+                self.tbl_queue.selectionModel().select(
+                    self.tbl_queue.model().index(index, 0),
+                    QItemSelectionModel.Select | QItemSelectionModel.Rows,
+                )
+        self._update_counts()
+        return True
+
     def sync_editor_from_jobs(self) -> None:
         self._duplicate_count_dirty = True
         self.txt_commands.blockSignals(True)
@@ -707,8 +749,40 @@ class QueueControllerMixin:
         if not open_path(path):
             self.show_compact_message("Open destination", f"Could not open the folder:\n{path}", "warning")
 
+    def _flush_pending_text_edits(self) -> bool:
+        """Keep queue actions from overwriting text awaiting its debounce."""
+        if getattr(self, "_text_debounce", None) is not None and self._text_debounce.isActive():
+            table = getattr(self, "tbl_queue", None)
+            selected = set(self.selected_indices()) if table is not None else set()
+            occurrences: dict[tuple[str, str, str], int] = {}
+            selected_jobs: set[tuple[tuple[str, str, str], int]] = set()
+            for index, job in enumerate(self.jobs):
+                identity = (job.raw, job.tag, job.notes)
+                occurrence = occurrences.get(identity, 0)
+                occurrences[identity] = occurrence + 1
+                if index in selected:
+                    selected_jobs.add((identity, occurrence))
+            if not self._rebuild_from_text():
+                return False
+            if table is not None:
+                # A newly inserted row shifts table indices. Restore selection
+                # by job identity (including duplicate occurrence), so Delete,
+                # Move, or Retry cannot act on an unrelated row after reparse.
+                table.clearSelection()
+                occurrences.clear()
+                for index, job in enumerate(self.jobs):
+                    identity = (job.raw, job.tag, job.notes)
+                    occurrence = occurrences.get(identity, 0)
+                    occurrences[identity] = occurrence + 1
+                    if (identity, occurrence) in selected_jobs:
+                        table.selectionModel().select(
+                            table.model().index(index, 0),
+                            QItemSelectionModel.Select | QItemSelectionModel.Rows,
+                        )
+        return True
+
     def move_selected(self, delta: int) -> None:
-        if self.active_workers > 0:
+        if self.active_workers > 0 or not self._flush_pending_text_edits():
             return
         idxs = self.selected_indices()
         if len(idxs) != 1:
@@ -722,7 +796,7 @@ class QueueControllerMixin:
             self.tbl_queue.selectRow(j)
 
     def move_selected_top(self) -> None:
-        if self.active_workers > 0:
+        if self.active_workers > 0 or not self._flush_pending_text_edits():
             return
         idxs = self.selected_indices()
         if len(idxs) != 1:
@@ -733,7 +807,7 @@ class QueueControllerMixin:
         self.tbl_queue.selectRow(0)
 
     def move_selected_bottom(self) -> None:
-        if self.active_workers > 0:
+        if self.active_workers > 0 or not self._flush_pending_text_edits():
             return
         idxs = self.selected_indices()
         if len(idxs) != 1:
@@ -744,7 +818,7 @@ class QueueControllerMixin:
         self.tbl_queue.selectRow(len(self.jobs) - 1)
 
     def delete_selected(self) -> None:
-        if self.active_workers > 0:
+        if self.active_workers > 0 or not self._flush_pending_text_edits():
             return
         idxs = self.selected_indices()
         if not idxs:
@@ -1252,6 +1326,8 @@ class QueueControllerMixin:
 
     @Slot()
     def retry_failed(self) -> None:
+        if self.active_workers > 0 or not self._flush_pending_text_edits():
+            return
         candidates = sorted(self.failed_indices | self.stopped_indices | self.cancelled_indices)
         if not candidates:
             self.show_compact_message("Retry", "No failed/stopped/cancelled jobs to retry.", "info")
@@ -1275,6 +1351,8 @@ class QueueControllerMixin:
     def retry_selected(self) -> None:
         if self.active_workers > 0:
             self.show_compact_message("Retry", "Wait until the current run finishes before retrying selected rows.", "info")
+            return
+        if not self._flush_pending_text_edits():
             return
         idxs = self.selected_indices()
         if not idxs:
@@ -1403,10 +1481,14 @@ class QueueControllerMixin:
             # Scheduled snapshots temporarily replace the visible queue so the
             # normal worker pipeline can render and track them. Put the user's
             # previous manual queue back before autosave persists the session.
-            self._restore_queue_after_scheduled_run()
-            self.autosave_session()
-            self.notify_finished()
-            self._update_counts()
+            # Notify with this run's results before the manual queue replaces
+            # them. Always restore the user's queue even if notification fails.
+            try:
+                self.notify_finished()
+            finally:
+                self._restore_queue_after_scheduled_run()
+                self.autosave_session()
+                self._update_counts()
 
 
 __all__ = [

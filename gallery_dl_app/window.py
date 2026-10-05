@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import queue
+import sys
 import threading
 from typing import Optional
 
@@ -24,6 +25,8 @@ from .core import (
     dependency_status,
     detect_config_path,
     find_gallery_dl,
+    read_text_safely,
+    redact_sensitive_text,
     safe_expand_path,
 )
 from .models import DownloadJob, JobResult
@@ -183,8 +186,11 @@ def _patched_show_dependency_helper(self: MainWindow) -> None:
     for name in sorted(deps):
         lines.append(f"- {name}: {ok if deps[name] else missing}")
     lines.append("")
-    lines.append("Install / upgrade commands:" if not ind else "Command install / upgrade:")
-    if IS_WINDOWS:
+    frozen = bool(getattr(sys, "frozen", False))
+    lines.append("Application maintenance:" if not ind else "Perawatan aplikasi:")
+    if frozen:
+        lines.append("Use Manage → Application and Files for the release link and backups. Extract the complete release folder when updating." if not ind else "Gunakan Manage → Aplikasi dan File untuk tautan rilis dan backup. Ekstrak folder rilis lengkap saat memperbarui.")
+    elif IS_WINDOWS:
         lines.extend([
             "py -m pip install --upgrade pip setuptools wheel",
             "py -m pip install -U gallery-dl PySide6 openpyxl pillow keyring",
@@ -205,6 +211,22 @@ def _patched_show_dependency_helper(self: MainWindow) -> None:
     lines.append("Notes:" if not ind else "Catatan:")
     lines.append("- This GUI still runs gallery-dl through subprocess; dependencies only affect gallery-dl capabilities." if not ind else "- GUI ini tetap menjalankan gallery-dl lewat subprocess; dependency hanya memengaruhi kemampuan gallery-dl.")
     lines.append("- openpyxl is only needed for XLSX import/export. Pillow is only needed for PNG→WebP post-processing." if not ind else "- openpyxl hanya untuk import/export XLSX. Pillow hanya untuk post-process PNG→WebP.")
+    lines.append("")
+    lines.append("Active config checks:" if not ind else "Pemeriksaan config aktif:")
+    if self.config_path:
+        from .config_helper import config_helper_text, parse_config_json
+        try:
+            path = safe_expand_path(self.config_path)
+            if path.suffix.lower() in {".json", ".conf"}:
+                data = parse_config_json(read_text_safely(path))
+                lines.append(config_helper_text(data, indonesian=ind, dependencies=deps))
+            else:
+                lines.append("Open Config Maker to inspect a JSON draft." if not ind else "Buka Config Maker untuk memeriksa draft JSON.")
+        except Exception as exc:
+            lines.append(redact_sensitive_text(str(exc)))
+    else:
+        lines.append("Choose a config in Config Maker, then use Preview → Config helper." if not ind else "Pilih config di Config Maker, lalu gunakan Pratinjau → Bantuan config.")
+    lines.append("Link Builder helps with usernames, IDs and batches. Prepare safe test checks access before downloading media." if not ind else "Link Builder membantu pengguna, ID dan batch. Siapkan tes aman memeriksa akses sebelum mengunduh media.")
     self.show_scroll_message("Dependency Helper", "\n".join(lines), "info")
 
 def _patched_quick_guide_text(self: MainWindow, language: str | None = None) -> str:

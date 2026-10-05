@@ -1,0 +1,23 @@
+{
+    "extractor": {
+        "base-directory": "./downloads",
+        "instagram": {
+            "include": ["posts"],
+            "file-filter": "extension in ('jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'bmp', 'tif', 'tiff', 'heic', 'heif')",
+            "archive": "./download-history/instagram.sqlite3",
+            "sleep-request": [6.0, 12.0]
+        },
+        "twitter": {
+            "include": ["media"],
+            "file-filter": "extension in ('jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'bmp', 'tif', 'tiff', 'heic', 'heif')",
+            "archive": "./download-history/twitter.sqlite3",
+            "sleep-request": [1.0, 3.0]
+        },
+        "bluesky": {
+            "include": ["media"],
+            "file-filter": "extension in ('jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'bmp', 'tif', 'tiff', 'heic', 'heif')",
+            "archive": "./download-history/bluesky.sqlite3",
+            "sleep-request": [1.0, 3.0]
+        }
+    }
+}

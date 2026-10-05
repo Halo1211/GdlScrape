@@ -1,0 +1,9 @@
+{
+  "#": "Adapted from https://github.com/mikf/gallery-dl/blob/v1.32.14/docs/gallery-dl-example.conf. Original chapter files are kept.",
+  "extractor": {
+    "mangadex": {"lang": "en", "postprocessors": ["chapter-cbz"]}
+  },
+  "postprocessor": {
+    "chapter-cbz": {"name": "zip", "extension": "cbz", "compression": "store", "keep-files": true}
+  }
+}

@@ -6,12 +6,16 @@ import html
 import json
 import os
 import platform
+import re
 import shutil
+import sqlite3
+import stat
 import sys
 import tempfile
 import threading
 import time
 import zipfile
+from contextlib import closing
 from pathlib import Path
 from typing import Callable
 
@@ -39,6 +43,9 @@ from .core import (
     classify_error,
     dependency_status,
     human_size,
+    is_link_or_reparse,
+    iter_tree_entries,
+    jobs_to_database_text,
     open_path,
     read_text_safely,
     redact_sensitive_database_text,
@@ -65,6 +72,7 @@ def _app_data_backup_entries(
     app_dir: str | Path,
     backup_dir: str | Path,
     target: str | Path,
+    stop_event: threading.Event | None = None,
 ) -> list[tuple[Path, Path]]:
     """Return source files paired with stable archive-relative paths.
 
@@ -89,30 +97,32 @@ def _app_data_backup_entries(
     entries: list[tuple[Path, Path]] = []
     pending: list[tuple[Path, Path]] = [(app_input, Path())]
     while pending:
+        if stop_event is not None and stop_event.is_set():
+            raise InterruptedError("backup cancelled")
         directory, relative_directory = pending.pop()
-        try:
-            children = list(os.scandir(directory))
-        except OSError:
-            continue
-        for child in children:
-            relative = relative_directory / child.name
-            try:
+        # A partial backup must fail instead of replacing a complete archive.
+        with os.scandir(directory) as children:
+            for child in children:
+                if stop_event is not None and stop_event.is_set():
+                    raise InterruptedError("backup cancelled")
+                relative = relative_directory / child.name
+                if target_relative is not None and relative == target_relative:
+                    continue
+                if backup_relative is not None and (
+                    relative == backup_relative or relative.is_relative_to(backup_relative)
+                ):
+                    continue
                 if child.is_symlink():
+                    continue
+                attributes = getattr(child.stat(follow_symlinks=False), "st_file_attributes", 0)
+                if attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0):
                     continue
                 if child.is_dir(follow_symlinks=False):
                     pending.append((Path(child.path), relative))
                     continue
                 if not child.is_file(follow_symlinks=False):
                     continue
-            except OSError:
-                continue
-            if target_relative is not None and relative == target_relative:
-                continue
-            if backup_relative is not None and (
-                relative == backup_relative or relative.is_relative_to(backup_relative)
-            ):
-                continue
-            entries.append((Path(child.path), relative))
+                entries.append((Path(child.path), relative))
     return entries
 
 
@@ -125,7 +135,18 @@ def write_app_data_backup(
     """Create a ZIP atomically, preserving an existing target on failure."""
     target_path = Path(target).expanduser()
     target_path.parent.mkdir(parents=True, exist_ok=True)
-    entries = _app_data_backup_entries(app_dir, backup_dir, target_path)
+    entries = _app_data_backup_entries(app_dir, backup_dir, target_path, stop_event)
+    sqlite_paths: set[Path] = set()
+    for file, relative in entries:
+        if stop_event is not None and stop_event.is_set():
+            raise InterruptedError("backup cancelled")
+        with file.open("rb") as source:
+            if source.read(16) == b"SQLite format 3\x00":
+                sqlite_paths.add(relative)
+    sqlite_sidecars = {
+        Path(f"{relative}{suffix}")
+        for relative in sqlite_paths for suffix in ("-wal", "-shm", "-journal")
+    }
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{target_path.name}.",
         suffix=".tmp",
@@ -138,13 +159,45 @@ def write_app_data_backup(
             for file, relative in entries:
                 if stop_event is not None and stop_event.is_set():
                     raise InterruptedError("backup cancelled")
-                zf.write(file, relative)
+                if relative in sqlite_sidecars:
+                    continue
+                if relative in sqlite_paths:
+                    _write_sqlite_backup(zf, file, relative, target_path.parent, stop_event)
+                else:
+                    zf.write(file, relative)
+        if stop_event is not None and stop_event.is_set():
+            raise InterruptedError("backup cancelled")
         os.replace(tmp, target_path)
     finally:
         try:
             tmp.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+def _write_sqlite_backup(
+    archive: zipfile.ZipFile,
+    source_path: Path,
+    relative: Path,
+    temporary_dir: Path,
+    stop_event: threading.Event | None,
+) -> None:
+    """Archive a consistent SQLite snapshot, incorporating committed WAL data."""
+    def check_cancelled(_status: int, _remaining: int, _total: int) -> None:
+        if stop_event is not None and stop_event.is_set():
+            raise InterruptedError("backup cancelled")
+
+    with tempfile.TemporaryDirectory(prefix=".sqlite-snapshot-", dir=temporary_dir) as folder:
+        snapshot = Path(folder) / "snapshot.sqlite3"
+        source_uri = source_path.resolve().as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(source_uri, uri=True)) as source:
+            with closing(sqlite3.connect(snapshot)) as destination:
+                source.backup(destination, pages=256, progress=check_cancelled, sleep=0.05)
+                # A snapshot copied from a WAL database must restore without
+                # depending on a separately copied WAL or shared-memory file.
+                destination.execute("PRAGMA journal_mode=DELETE")
+        check_cancelled(0, 0, 0)
+        archive.write(snapshot, relative)
 
 
 def scan_output_tree(
@@ -158,7 +211,9 @@ def scan_output_tree(
     total = files = dirs = scanned = 0
     capped = False
     largest_heap: list[tuple[int, str, Path]] = []
-    for item in root.rglob("*"):
+    if stop_event is not None and stop_event.is_set():
+        raise InterruptedError("scan cancelled")
+    for item, metadata in iter_tree_entries(root):
         if stop_event is not None and stop_event.is_set():
             raise InterruptedError("scan cancelled")
         scanned += 1
@@ -166,13 +221,13 @@ def scan_output_tree(
             capped = True
             break
         try:
-            if item.is_symlink():
+            if is_link_or_reparse(metadata):
                 continue
-            if item.is_dir():
+            if stat.S_ISDIR(metadata.st_mode):
                 dirs += 1
-            elif item.is_file():
+            elif stat.S_ISREG(metadata.st_mode):
                 files += 1
-                size = item.stat().st_size
+                size = metadata.st_size
                 total += size
                 entry = (size, str(item), item)
                 if len(largest_heap) < 10:
@@ -243,8 +298,15 @@ class ReportsMixin:
         # silently threw away the user's saved queue even though the JSON on
         # disk was perfectly fine.
         try:
-            data = json.loads(read_text_safely(AUTOSAVE_FILE))
+            raw = read_text_safely(AUTOSAVE_FILE)
         except Exception as exc:
+            # A lock, size limit, or decoding failure says nothing about JSON
+            # validity. Preserve the original for retry or manual recovery.
+            self.append_log(f"[autosave] read failed (file kept intact): {redact_sensitive_text(str(exc))}")
+            return
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
             try:
                 bad = unique_path(AUTOSAVE_FILE.with_name(AUTOSAVE_FILE.name + f".bad_{timestamp_slug()}"))
                 AUTOSAVE_FILE.replace(bad)
@@ -288,7 +350,7 @@ class ReportsMixin:
         if path:
             self._safe_write_file(
                 path,
-                redact_sensitive_database_text("\n".join(self.jobs[i].raw for i in idxs)),
+                redact_sensitive_database_text(jobs_to_database_text(self.jobs[i] for i in idxs)),
                 "Export failed",
             )
 
@@ -422,25 +484,34 @@ class ReportsMixin:
 </body></html>"""
 
     def export_audit_report(self) -> None:
-        app_data_dir()
-        default = APP_DIR / f"audit_report_{timestamp_slug()}.html"
-        path, _ = QFileDialog.getSaveFileName(self, "Export audit HTML", str(default), "HTML (*.html)")
-        if path:
-            # Route through the guarded writer: a locked/read-only target used
-            # to raise an uncaught exception inside this Qt slot (same class as
-            # the stab3.4 error-summary CSV fix).
-            if self._safe_write_file(path, self.diagnostic_html(), "Export audit HTML"):
-                self.append_log(f"[audit] exported: {path}")
+        try:
+            app_data_dir()
+            default = APP_DIR / f"audit_report_{timestamp_slug()}.html"
+            path, _ = QFileDialog.getSaveFileName(self, "Export audit HTML", str(default), "HTML (*.html)")
+            if not path:
+                return
+            report = self.diagnostic_html()
+        except Exception as exc:
+            self.show_compact_message("Export audit HTML failed", redact_sensitive_text(str(exc)), "error")
+            return
+        if self._safe_write_file(path, report, "Export audit HTML"):
+            self.append_log(f"[audit] exported: {path}")
 
     def analyze_log_lines(self) -> dict[str, int]:
         counts = {"network": 0, "auth/cookies": 0, "not-found": 0, "config": 0, "path": 0, "rate-limit": 0, "unknown": 0, "warnings": 0, "errors": 0}
         for line in self.all_log_lines:
-            low = line.lower()
-            if any(x in low for x in ("warning", "warn", "⚠")):
+            message = re.sub(r"^\[W\d+\]\s*", "", line).strip()
+            # Transfer output is a filename, not a diagnostic. The worker uses
+            # the same path shape before counting errors/warnings for a job.
+            if re.match(r"^(?:[A-Za-z]:[\\/]|/|\\\\|\./|\.\\|# )", message):
+                continue
+            if message.startswith(("[input]", "[queue]", "[PROGRESS]", "[DONE]")):
+                continue
+            if re.search(r"\b(?:warning|warn)\b|⚠", message, re.I):
                 counts["warnings"] += 1
-            if any(x in low for x in ("error", "failed", "traceback", "exception", "❌")):
+            if re.search(r"\b(?:error|failed|traceback|exception)\b|❌", message, re.I):
                 counts["errors"] += 1
-                counts[classify_error(line)] += 1
+                counts[classify_error(message)] += 1
         return counts
 
     def show_log_analyzer(self) -> None:
@@ -606,7 +677,11 @@ Important
         dlg.exec()
 
     def export_archive_config_example(self) -> None:
-        app_data_dir()
+        try:
+            app_data_dir()
+        except OSError as exc:
+            self.show_compact_message("Archive config export failed", redact_sensitive_text(str(exc)), "error")
+            return
         default_path = APP_DIR / "gallery_dl_archive_config_example.json"
         path, _ = QFileDialog.getSaveFileName(self, "Export gallery-dl archive config example", str(default_path), "JSON (*.json);;All files (*.*)")
         if not path:
@@ -628,7 +703,11 @@ Important
             self.show_compact_message("Archive config export failed", str(exc), "error")
 
     def open_app_data_dir(self) -> None:
-        app_data_dir()
+        try:
+            app_data_dir()
+        except OSError as exc:
+            self.show_compact_message("Open App Data Folder", redact_sensitive_text(str(exc)), "error")
+            return
         if not open_path(APP_DIR):
             QApplication.clipboard().setText(str(APP_DIR))
             self.show_compact_message(
@@ -645,9 +724,9 @@ Important
         if not src.is_file():
             self.show_compact_message("Backup Config", f"Config is not a file:\n{src}", "warning")
             return
-        app_data_dir()
-        dst = unique_path(BACKUP_DIR / f"config_backup_{timestamp_slug()}{src.suffix or '.conf'}")
         try:
+            app_data_dir()
+            dst = unique_path(BACKUP_DIR / f"config_backup_{timestamp_slug()}{src.suffix or '.conf'}")
             shutil.copy2(src, dst)
             self.show_compact_message("Backup Config", f"Config backed up to:\n{dst}", "info")
         except Exception as exc:
@@ -665,7 +744,11 @@ Important
         if existing_worker is not None and existing_worker.isRunning():
             self.show_compact_message("Backup App Data", "A backup is already running.", "info")
             return
-        app_data_dir()
+        try:
+            app_data_dir()
+        except OSError as exc:
+            self.show_compact_message("Backup failed", str(exc), "error")
+            return
         default = BACKUP_DIR / f"app_data_backup_{timestamp_slug()}.zip"
         path, _ = QFileDialog.getSaveFileName(self, "Backup app data", str(default), "ZIP (*.zip)")
         if not path:
@@ -691,7 +774,12 @@ Important
         )
         worker.finished.connect(worker.deleteLater)
         self.statusBar().showMessage("Backing up app data…", 5000)
-        worker.start()
+        try:
+            worker.start()
+        except Exception as exc:
+            self._backup_file_worker = None
+            worker.deleteLater()
+            self.show_compact_message("Backup failed", str(exc), "error")
 
     def scan_output_folder(self) -> None:
         existing_worker = getattr(self, "_scan_file_worker", None)
@@ -734,7 +822,12 @@ Important
         )
         worker.finished.connect(worker.deleteLater)
         self.statusBar().showMessage(f"Scanning output folder: {folder}", 5000)
-        worker.start()
+        try:
+            worker.start()
+        except Exception as exc:
+            self._scan_file_worker = None
+            worker.deleteLater()
+            self.show_compact_message("Scan failed", str(exc), "error")
 
     def _ui_translate_text(self, text: str) -> str:
         """Translate common runtime dialog text when Indonesian UI is active."""
@@ -896,6 +989,9 @@ Important
         icon_label.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
         icon_label.setFixedWidth(24)
         body = QLabel(str(message))
+        # Remote downloader errors are text. AutoText interprets HTML-like
+        # fragments (including local image URLs) as rich content in this dialog.
+        body.setTextFormat(Qt.PlainText)
         body.setWordWrap(True)
         body.setTextInteractionFlags(Qt.TextSelectableByMouse)
         body.setMinimumWidth(270)

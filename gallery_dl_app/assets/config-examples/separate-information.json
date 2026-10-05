@@ -1,0 +1,20 @@
+{
+  "extractor": {
+    "base-directory": "./downloads",
+    "danbooru": {
+      "directory": ["images", "{category}"],
+      "postprocessors": [
+        {
+          "name": "metadata",
+          "mode": "json",
+          "event": "file",
+          "base-directory": true,
+          "directory": ["metadata", "{category}"],
+          "filename": "{id}.json",
+          "indent": "\t",
+          "ascii": false
+        }
+      ]
+    }
+  }
+}

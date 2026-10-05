@@ -1,0 +1,11 @@
+{
+    "extractor": {
+        "base-directory": "./downloads",
+        "imgur": {
+            "directory": {
+                "'nature' in content": ["imgur", "Nature"],
+                "": ["imgur", "Other"]
+            }
+        }
+    }
+}

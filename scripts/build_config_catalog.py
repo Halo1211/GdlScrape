@@ -12,12 +12,12 @@ from pathlib import Path
 from urllib.request import urlopen
 
 
-VERSION = "v1.32.12"
+VERSION = "v1.32.14"
 SOURCE = f"https://raw.githubusercontent.com/mikf/gallery-dl/{VERSION}/docs/configuration.rst"
 TARGET = Path(__file__).resolve().parents[1] / "gallery_dl_app" / "assets" / "config-options.json"
 HEADING = re.compile(r"^(extractor|downloader|output|cache|jinja)\.[\w*\[\].& -]+$")
 POSTPROCESSOR_HEADING = re.compile(r"^[a-z][a-z0-9-]*\.[a-z][a-z0-9-]*$")
-FIELD = re.compile(r"^(Type|Default|Description|Example|Note|Supported Values|Special Values|Implementation Detail)$")
+FIELD = re.compile(r"^(Type|Default|Description|Example|Note|Supported Values|Available Events|Special Values|Implementation Detail)$")
 
 
 def clean(value: str) -> str:
@@ -44,14 +44,24 @@ def parse(source: str) -> list[dict[str, object]]:
             next_heading += 1
         chunk = lines[index + 2 : next_heading]
         fields: dict[str, list[str]] = {}
+        raw_fields: dict[str, list[str]] = {}
         current = ""
         for line in chunk:
             if FIELD.fullmatch(line):
                 current = line
                 fields.setdefault(current, [])
+                raw_fields.setdefault(current, [])
             elif current and line.strip():
                 fields[current].append(clean(line.strip()))
+                raw_fields[current].append(line)
         types = " ".join(fields.get("Type", [])).lower()
+        allowed_types = []
+        for line in raw_fields.get("Type", []):
+            match = re.match(r"\s*(?:[*+]\s*)?``(bool|string|integer|number|float|list|object)``", line)
+            if match:
+                kind = {"bool": "boolean", "string": "text", "float": "number"}.get(match[1], match[1])
+                if kind not in allowed_types:
+                    allowed_types.append(kind)
         value_type = "text"
         if "bool" in types and "string" not in types and "integer" not in types:
             value_type = "boolean"
@@ -67,9 +77,53 @@ def parse(source: str) -> list[dict[str, object]]:
             try:
                 default = json.loads(candidate)
             except (ValueError, TypeError):
-                pass
-        description = clean(" ".join(fields.get("Description", [])))[:180]
+                block = "\n".join(raw_fields.get("Default", []))
+                start = next((pos for pos, char in enumerate(block) if char in "[{"), None)
+                if start is not None:
+                    try:
+                        default, _ = json.JSONDecoder().raw_decode(block[start:])
+                    except ValueError:
+                        pass
+        description = clean(" ".join(fields.get("Description", [])))
+        choices = []
+        choice_help: dict[str, str] = {}
+        for section in ("Description", "Supported Values", "Available Events"):
+            active_choices = []
+            for line in raw_fields.get(section, []):
+                stripped = line.strip().removeprefix("* ")
+                tokens = re.findall(r"``([^`]+)``", stripped)
+                remainder = re.sub(r"``[^`]+``", "", stripped).replace("|", "").strip()
+                if not tokens or remainder:
+                    for token in active_choices:
+                        choice_help[token] = (choice_help.get(token, "") + " " + clean(stripped)).strip()
+                    continue
+                active_choices = []
+                for token in tokens:
+                    try:
+                        choice = json.loads(token)
+                    except ValueError:
+                        if section == "Description":
+                            continue
+                        choice = token
+                    if isinstance(choice, (dict, list)):
+                        continue
+                    if not any(type(choice) is type(existing) and choice == existing for existing in choices):
+                        choices.append(choice)
+                    active_choices.append(json.dumps(choice, ensure_ascii=False))
         first, *siblings = title.split(" & ")
+        suggestions = []
+        if "list" in allowed_types:
+            for line in raw_fields.get("Example", []):
+                tokens = re.findall(r"``([^`]+)``", line)
+                for token in tokens:
+                    try:
+                        values = json.loads(token)
+                    except ValueError:
+                        continue
+                    values = values if isinstance(values, list) else [values]
+                    for value in values:
+                        if isinstance(value, str) and value not in suggestions:
+                            suggestions.append(value)
         prefix = first.rsplit(".", 1)[0]
         paths = [first] + [prefix + sibling for sibling in siblings]
         for path in paths:
@@ -77,7 +131,16 @@ def parse(source: str) -> list[dict[str, object]]:
                 "path": f"postprocessor.{path}" if is_postprocessor else path,
                 "type": value_type,
                 "default": default,
+                "default_text": " ".join(fields.get("Default", [])),
                 "description": description,
+                "declared_type": types,
+                "allowed_types": allowed_types,
+                "string_items": bool(re.search(r"``list``\s+of\s+``strings``", " ".join(raw_fields.get("Type", [])))),
+                "choices": choices,
+                "choice_help": choice_help,
+                "suggestions": suggestions,
+                "example": "\n".join(line.strip() for line in raw_fields.get("Example", []) if not line.strip().startswith(".. code")),
+                "notes": clean(" ".join(fields.get("Note", []))),
             })
     return catalog
 

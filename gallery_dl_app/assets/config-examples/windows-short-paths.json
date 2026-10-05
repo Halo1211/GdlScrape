@@ -1,0 +1,11 @@
+{
+  "extractor": {
+    "path-restrict": "windows",
+    "path-strip": "windows",
+    "path-replace": "_",
+    "artstation": {
+      "directory": ["artstation", "{userinfo[username]}", "{id}_{title[:60]}"],
+      "filename": "{id}_{asset[id]}.{extension}"
+    }
+  }
+}

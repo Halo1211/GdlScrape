@@ -8,6 +8,8 @@ import time
 from datetime import datetime, timedelta
 from typing import Iterable
 
+from .core import validate_finite_numbers
+
 
 FALLBACK_OPTIONS = [
     ("--range", "File index range", True),
@@ -164,7 +166,7 @@ def _filter_value(raw: str) -> str:
         if re.fullmatch(r"-?\d+(?:\.\d+)?", raw):
             return raw
         return repr(raw)
-    return repr(value)
+    return repr(validate_finite_numbers(value))
 
 
 def next_schedule_time(schedule: dict[str, object], now: float | None = None) -> float:

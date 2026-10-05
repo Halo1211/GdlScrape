@@ -1,0 +1,32 @@
+{
+  "extractor": {
+    "base-directory": "./downloads",
+    "twitter": {
+      "text-tweets": true,
+      "postprocessors": [
+        {
+          "name": "metadata",
+          "mode": "custom",
+          "event": "post",
+          "base-directory": true,
+          "directory": ["post-text", "twitter"],
+          "filename": "{tweet_id}.txt",
+          "format": "{content}\n"
+        }
+      ]
+    },
+    "tumblr": {
+      "postprocessors": [
+        {
+          "name": "metadata",
+          "mode": "custom",
+          "event": "post",
+          "base-directory": true,
+          "directory": ["post-text", "tumblr", "{blog_name}"],
+          "filename": "{id}.txt",
+          "format": "{answer|body|description|excerpt|summary!H:?//}\n"
+        }
+      ]
+    }
+  }
+}

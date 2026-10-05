@@ -1,0 +1,22 @@
+{
+  "#": "Synthetic fixture based on the gallery-dl official example and Config File Outline. Contains no login or executable actions.",
+  "extractor": {
+    "base-directory": "~/gallery-dl/",
+    "archive-pragma": ["journal_mode=WAL", "synchronous=NORMAL"],
+    "postprocessors": [{"name": "mtime", "event": "post"}],
+    "pixiv": {"postprocessors": ["ugoira-copy"], "favorite": {"directory": ["Pixiv", "Favorites", "{user[id]}"]}},
+    "twitter": {"postprocessors": ["content", {"type": "meta", "filename": "{id}.json"}], "text-tweets": true},
+    "mangadex": {"lang": "en", "postprocessors": ["cbz"]},
+    "tbib": {"directory": {"locals().get('bkey')": ["TBIB", "{bkey}"], "": ["TBIB", "Unsorted"]}, "sleep-request": [0, 1.2]},
+    "reddit>imgur": {"directory": [], "filename": "{_reddit[id]} {id}.{extension}"},
+    "deviantart": {"postprocessors": {"name": "metadata", "mode": "custom", "content-format": "{description}\n", "extension-format": "descr.txt", "directory": "Descriptions"}}
+  },
+  "downloader": {"http": {"timeout": 30.5}, "ytdl": {"format": "best"}},
+  "output": {"logfile": {"path": "~/gallery-dl/log.txt", "mode": "a"}},
+  "postprocessor": {
+    "content": {"name": "metadata", "mode": "custom", "event": "post", "filename": "{id}.txt", "format": "{content|description}\n", "filter": "True"},
+    "meta": {"name": "metadata/json@post", "indent": 2, "ascii": false},
+    "cbz": {"name": "zip", "extension": "cbz"},
+    "ugoira-copy": {"name": "ugoira", "extension": "mkv"}
+  }
+}

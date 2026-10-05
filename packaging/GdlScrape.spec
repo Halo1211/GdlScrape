@@ -8,7 +8,10 @@ from PyInstaller.utils.hooks import collect_submodules
 
 project_root = Path(SPECPATH).parent
 incompatible_icu = re.compile(r"^icu(?:uc|in|dt).*\.dll$", re.IGNORECASE)
-gallery_dl_hiddenimports = collect_submodules("gallery_dl.extractor")
+# gallery-dl selects these modules by name at runtime; static analysis misses them.
+gallery_dl_hiddenimports = []
+for package in ("gallery_dl.extractor", "gallery_dl.downloader", "gallery_dl.postprocessor"):
+    gallery_dl_hiddenimports.extend(collect_submodules(package))
 
 a = Analysis(
     [str(project_root / "gdlscrape.py"), str(project_root / "packaging" / "gallery_dl_cli.py")],

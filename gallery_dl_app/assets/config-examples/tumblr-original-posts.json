@@ -1,0 +1,10 @@
+{
+  "extractor": {
+    "tumblr": {
+      "posts": ["photo", "video"],
+      "external": false,
+      "reblogs": false,
+      "inline": true
+    }
+  }
+}

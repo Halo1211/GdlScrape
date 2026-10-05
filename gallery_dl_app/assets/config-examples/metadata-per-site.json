@@ -1,0 +1,12 @@
+{
+  "#": "Adapted from https://github.com/mikf/gallery-dl/blob/v1.32.14/docs/gallery-dl-example.conf and its Config File Outline wiki. Login is configured separately.",
+  "extractor": {
+    "pixiv": {"postprocessors": ["post-json"]},
+    "instagram": {"postprocessors": ["post-json"]},
+    "twitter": {"postprocessors": ["post-json", "post-text"]}
+  },
+  "postprocessor": {
+    "post-json": {"name": "metadata", "mode": "json", "event": "post", "filename": "{id}.json", "indent": 2, "ascii": false},
+    "post-text": {"name": "metadata", "mode": "custom", "event": "post", "filename": "{id}.txt", "format": "{content|description}\n"}
+  }
+}

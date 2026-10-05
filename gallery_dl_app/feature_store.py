@@ -33,6 +33,7 @@ from .core import (
 
 
 FEATURE_DB = APP_DIR / "library.sqlite3"
+SQLITE_MAX_INTEGER = (1 << 63) - 1
 
 
 def _finite_timestamp(value: object, *, field: str) -> float:
@@ -51,6 +52,12 @@ def _nullable_return_code(value: object) -> int | None:
     if value is None or value == "":
         return None
     return normalize_process_return_code(value)
+
+
+def _literal_like_contains(value: str) -> str:
+    """Build a contains pattern where user-entered LIKE characters stay literal."""
+    escaped = value.strip().replace("!", "!!").replace("%", "!%").replace("_", "!_")
+    return f"%{escaped}%"
 
 
 def _recent_bounded_jsonl_lines(path: Path) -> Iterator[str]:
@@ -132,14 +139,19 @@ class FeatureStore:
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.path, timeout=10)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys=ON")
-        connection.execute("PRAGMA busy_timeout=10000")
         try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute("PRAGMA busy_timeout=10000")
             yield connection
             connection.commit()
         except Exception:
-            connection.rollback()
+            try:
+                connection.rollback()
+            except sqlite3.Error:
+                # Closing the connection still releases the transaction. Keep
+                # the original operation error useful to callers and the UI.
+                pass
             raise
         finally:
             connection.close()
@@ -178,6 +190,7 @@ class FeatureStore:
                     command TEXT NOT NULL DEFAULT '',
                     service TEXT NOT NULL DEFAULT '-',
                     tag TEXT NOT NULL DEFAULT '',
+                    notes TEXT NOT NULL DEFAULT '',
                     output_dir TEXT NOT NULL DEFAULT '',
                     account_profile_id INTEGER,
                     enabled INTEGER NOT NULL DEFAULT 1,
@@ -194,7 +207,8 @@ class FeatureStore:
                     started_at REAL NOT NULL,
                     finished_at REAL,
                     status TEXT NOT NULL,
-                    source TEXT NOT NULL DEFAULT 'manual'
+                    source TEXT NOT NULL DEFAULT 'manual',
+                    owner_pid INTEGER
                 );
                 CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
 
@@ -203,6 +217,8 @@ class FeatureStore:
                     job_index INTEGER NOT NULL,
                     command TEXT NOT NULL,
                     url TEXT NOT NULL,
+                    tag TEXT NOT NULL DEFAULT '',
+                    notes TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL DEFAULT 'queued',
                     downloaded INTEGER NOT NULL DEFAULT 0,
                     skipped INTEGER NOT NULL DEFAULT 0,
@@ -250,6 +266,15 @@ class FeatureStore:
                 db.execute("ALTER TABLE library_entries ADD COLUMN command TEXT NOT NULL DEFAULT ''")
             if "account_profile_id" not in columns:
                 db.execute("ALTER TABLE library_entries ADD COLUMN account_profile_id INTEGER")
+            if "notes" not in columns:
+                db.execute("ALTER TABLE library_entries ADD COLUMN notes TEXT NOT NULL DEFAULT ''")
+            run_columns = {str(row[1]) for row in db.execute("PRAGMA table_info(run_items)")}
+            for field in ("tag", "notes"):
+                if field not in run_columns:
+                    db.execute(f"ALTER TABLE run_items ADD COLUMN {field} TEXT NOT NULL DEFAULT ''")
+            runs_columns = {str(row[1]) for row in db.execute("PRAGMA table_info(runs)")}
+            if "owner_pid" not in runs_columns:
+                db.execute("ALTER TABLE runs ADD COLUMN owner_pid INTEGER")
             schedule_columns = {
                 str(row[1]) for row in db.execute("PRAGMA table_info(schedules)")
             }
@@ -317,8 +342,8 @@ class FeatureStore:
                                     redact_sensitive_text(str(record.get("url"))),
                                     return_code,
                                     str(record.get("error_type") or "unknown"),
-                                    safe_int(record.get("downloaded"), 0, 0),
-                                    safe_int(record.get("skipped"), 0, 0),
+                                    safe_int(record.get("downloaded"), 0, 0, SQLITE_MAX_INTEGER),
+                                    safe_int(record.get("skipped"), 0, 0, SQLITE_MAX_INTEGER),
                                     redact_sensitive_text(str(record.get("message") or "")),
                                 ),
                             )
@@ -345,8 +370,8 @@ class FeatureStore:
                     redact_sensitive_text(str(record.get("url") or "")),
                     _nullable_return_code(record.get("rc")),
                     str(record.get("error_type") or "unknown"),
-                    safe_int(record.get("downloaded"), 0, 0),
-                    safe_int(record.get("skipped"), 0, 0),
+                    safe_int(record.get("downloaded"), 0, 0, SQLITE_MAX_INTEGER),
+                    safe_int(record.get("skipped"), 0, 0, SQLITE_MAX_INTEGER),
                     redact_sensitive_text(str(record.get("message") or "")),
                 ),
             )
@@ -356,8 +381,8 @@ class FeatureStore:
         query = "SELECT * FROM history"
         params: list[object] = []
         if search.strip():
-            query += " WHERE url LIKE ? OR service LIKE ? OR status LIKE ?"
-            needle = f"%{search.strip()}%"
+            query += " WHERE url LIKE ? ESCAPE '!' OR service LIKE ? ESCAPE '!' OR status LIKE ? ESCAPE '!'"
+            needle = _literal_like_contains(search)
             params.extend([needle, needle, needle])
         query += " ORDER BY id DESC LIMIT ?"
         params.append(limit)
@@ -379,46 +404,71 @@ class FeatureStore:
         output_dir: str = "",
         account_profile_id: int | None = None,
         command: str = "",
+        notes: str = "",
+    ) -> int:
+        return self.add_library_entries([dict(
+            url=url, title=title, service=service, tag=tag, output_dir=output_dir,
+            account_profile_id=account_profile_id, command=command, notes=notes,
+        )])[0]
+
+    def add_library_entries(self, entries: Iterable[dict[str, object]]) -> list[int]:
+        """Import a batch atomically so a failed row leaves the library intact."""
+        with self._connect() as db:
+            return [self._add_library_entry(db, **entry) for entry in entries]
+
+    def _add_library_entry(
+        self,
+        db: sqlite3.Connection,
+        *,
+        url: str,
+        title: str = "",
+        service: str = "-",
+        tag: str = "",
+        output_dir: str = "",
+        account_profile_id: int | None = None,
+        command: str = "",
+        notes: str = "",
     ) -> int:
         now = time.time()
-        with self._connect() as db:
-            db.execute(
-                """INSERT INTO library_entries(
-                    title, url, command, service, tag, output_dir, account_profile_id,
+        db.execute(
+            """INSERT INTO library_entries(
+                    title, url, command, service, tag, notes, output_dir, account_profile_id,
                     created_at, updated_at
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(url) DO UPDATE SET
                     title=CASE WHEN excluded.title='' THEN library_entries.title ELSE excluded.title END,
                     command=CASE WHEN excluded.command='' THEN library_entries.command ELSE excluded.command END,
                     service=excluded.service,
-                    tag=excluded.tag,
-                    output_dir=excluded.output_dir,
-                    account_profile_id=excluded.account_profile_id,
+                    tag=CASE WHEN excluded.tag='' THEN library_entries.tag ELSE excluded.tag END,
+                    notes=CASE WHEN excluded.notes='' THEN library_entries.notes ELSE excluded.notes END,
+                    output_dir=CASE WHEN excluded.output_dir='' THEN library_entries.output_dir ELSE excluded.output_dir END,
+                    account_profile_id=COALESCE(excluded.account_profile_id, library_entries.account_profile_id),
                     updated_at=excluded.updated_at""",
-                (
-                    title,
-                    redact_sensitive_text(url.strip()),
-                    redact_sensitive_text(command),
-                    service or "-",
-                    tag,
-                    output_dir,
-                    account_profile_id,
-                    now,
-                    now,
-                ),
-            )
-            row = db.execute(
-                "SELECT id FROM library_entries WHERE url=?",
-                (redact_sensitive_text(url.strip()),),
-            ).fetchone()
+            (
+                redact_sensitive_text(title),
+                redact_sensitive_text(url.strip()),
+                redact_sensitive_text(command),
+                service or "-",
+                redact_sensitive_text(tag),
+                redact_sensitive_text(notes),
+                redact_sensitive_text(output_dir),
+                account_profile_id,
+                now,
+                now,
+            ),
+        )
+        row = db.execute(
+            "SELECT id FROM library_entries WHERE url=?",
+            (redact_sensitive_text(url.strip()),),
+        ).fetchone()
         return int(row[0])
 
     def list_library(self, search: str = "") -> list[dict[str, object]]:
         query = "SELECT * FROM library_entries"
         params: list[object] = []
         if search.strip():
-            query += " WHERE title LIKE ? OR url LIKE ? OR service LIKE ? OR tag LIKE ?"
-            needle = f"%{search.strip()}%"
+            query += " WHERE title LIKE ? ESCAPE '!' OR url LIKE ? ESCAPE '!' OR service LIKE ? ESCAPE '!' OR tag LIKE ? ESCAPE '!'"
+            needle = _literal_like_contains(search)
             params.extend([needle] * 4)
         query += " ORDER BY updated_at DESC, id DESC"
         with self._connect() as db:
@@ -440,7 +490,7 @@ class FeatureStore:
                 (
                     time.time(),
                     status,
-                    int(downloaded),
+                    safe_int(downloaded, 0, 0, SQLITE_MAX_INTEGER),
                     time.time(),
                     redact_sensitive_text(url),
                 ),
@@ -450,21 +500,23 @@ class FeatureStore:
         now = time.time()
         with self._connect() as db:
             cursor = db.execute(
-                "INSERT INTO runs(started_at, status, source) VALUES(?, 'running', ?)",
-                (now, source),
+                "INSERT INTO runs(started_at, status, source, owner_pid) VALUES(?, 'running', ?, ?)",
+                (now, source, os.getpid()),
             )
             run_id = int(cursor.lastrowid)
             for index in indices:
                 job = jobs[index]
                 db.execute(
                     """INSERT INTO run_items(
-                        run_id, job_index, command, url, status, updated_at
-                    ) VALUES(?, ?, ?, ?, 'queued', ?)""",
+                        run_id, job_index, command, url, tag, notes, status, updated_at
+                    ) VALUES(?, ?, ?, ?, ?, ?, 'queued', ?)""",
                     (
                         run_id,
                         int(index),
                         redact_sensitive_text(str(getattr(job, "raw", ""))),
                         redact_sensitive_text(str(getattr(job, "url", ""))),
+                        redact_sensitive_text(str(getattr(job, "tag", ""))),
+                        redact_sensitive_text(str(getattr(job, "notes", ""))),
                         now,
                     ),
                 )
@@ -490,9 +542,9 @@ class FeatureStore:
                    WHERE run_id=? AND job_index=?""",
                 (
                     status,
-                    int(downloaded),
-                    int(skipped),
-                    return_code,
+                    safe_int(downloaded, 0, 0, SQLITE_MAX_INTEGER),
+                    safe_int(skipped, 0, 0, SQLITE_MAX_INTEGER),
+                    _nullable_return_code(return_code),
                     redact_sensitive_text(message),
                     time.time(),
                     int(run_id),
@@ -512,8 +564,8 @@ class FeatureStore:
     def interrupted_runs(self) -> list[dict[str, object]]:
         with self._connect() as db:
             rows = db.execute(
-                """SELECT r.id AS run_id, r.started_at, i.job_index,
-                          i.command, i.url, i.status
+                """SELECT r.id AS run_id, r.started_at, r.owner_pid, i.job_index,
+                          i.command, i.url, i.tag, i.notes, i.status
                    FROM runs r JOIN run_items i ON i.run_id=r.id
                    WHERE r.status='running' AND i.status NOT IN ('done', 'cancelled')
                    ORDER BY r.id, i.job_index"""
@@ -554,12 +606,14 @@ class FeatureStore:
         )
         with self._connect() as db:
             if schedule_id:
-                db.execute(
+                cursor = db.execute(
                     """UPDATE schedules SET name=?, command_text=?, frequency=?,
                        interval_minutes=?, time_of_day=?, weekdays=?, enabled=?,
                        account_profile_id=?, next_run_at=?, updated_at=? WHERE id=?""",
                     (*payload, int(schedule_id)),
                 )
+                if cursor.rowcount != 1:
+                    raise ValueError("Schedule no longer exists; reload the schedule list")
                 return int(schedule_id)
             cursor = db.execute(
                 """INSERT INTO schedules(
@@ -644,12 +698,14 @@ class FeatureStore:
             raise ValueError("Account name and site are required")
         with self._connect() as db:
             if account_id:
-                db.execute(
+                cursor = db.execute(
                     """UPDATE account_profiles SET name=?, site=?, auth_kind=?,
                        username=?, cookie_source=?, secret_key=?, secret_ref=?,
                        oauth_instance=?, cache_file=?, updated_at=? WHERE id=?""",
                     (*payload, int(account_id)),
                 )
+                if cursor.rowcount != 1:
+                    raise ValueError("Account profile no longer exists; reload the account list")
                 return int(account_id)
             cursor = db.execute(
                 """INSERT INTO account_profiles(

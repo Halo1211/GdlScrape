@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 import stat
 import sys
 import time
@@ -14,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
-from PySide6.QtCore import QProcess, QTime, QTimer, Qt, QUrl
+from PySide6.QtCore import QProcess, QSignalBlocker, QTime, QTimer, Qt, QUrl
 from PySide6.QtGui import QAction, QTextCursor
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkProxy, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
@@ -49,21 +50,30 @@ from shiboken6 import isValid
 
 from .core import (
     APP_DIR,
+    GALLERY_DL_OPTION_VALUE_COUNTS,
     MANAGED_AUTH_KEYS,
+    MAX_QUEUE_JOBS,
+    MAX_QUEUE_SOURCE_ROWS,
     OAuthOutputRedactor,
     REDACTED,
     append_extra_args_to_database_text,
     atomic_write_text,
+    build_raw_command_from_columns,
     command_string_to_argv,
+    insert_gallery_dl_arguments,
     is_sensitive_option_key,
     parse_text_database,
+    process_is_running,
     quote_arg_for_preview,
     read_text_safely,
     redact_oauth_output as redact_oauth_output,
     redact_sensitive_database_text,
     redact_sensitive_text,
     safe_int,
+    safe_expand_path,
+    split_command,
     validate_cookies_txt,
+    validate_finite_numbers,
 )
 from .feature_logic import build_filter_expression, next_schedule_time, parse_help_options
 from .feature_store import FeatureStore
@@ -209,7 +219,7 @@ def account_action_argv(
 ) -> list[str]:
     """Build argv for account OAuth and cache-management actions."""
     base = command_string_to_argv(gdl_cmd or "gallery-dl") or ["gallery-dl"]
-    argv = list(base)
+    argv: list[str] = []
     if config_path:
         argv.extend(["--config", str(config_path)])
     cache = str(cache_file or "").strip()
@@ -234,7 +244,7 @@ def account_action_argv(
         argv.append("--cache-vacuum")
     else:
         raise ValueError(f"Unsupported account action: {action}")
-    return argv
+    return insert_gallery_dl_arguments(base, argv)
 
 
 def normalize_clipboard_url_candidate(value: str) -> str:
@@ -251,26 +261,34 @@ def normalize_clipboard_url_candidate(value: str) -> str:
 
 
 def interrupted_recovery_commands(rows: list[dict[str, object]]) -> list[str]:
-    """Keep one recovery command per unfinished run item, including duplicates."""
-    return [
-        str(row.get("command") or "").strip()
-        for row in rows
-        if str(row.get("command") or "").strip()
-    ]
+    """Restore unfinished commands and metadata, including duplicate jobs."""
+    return library_records_to_database_text([
+        row for row in rows if str(row.get("command") or "").strip()
+    ]).splitlines()
 
 
 def library_records_to_database_text(rows: list[dict[str, object]]) -> str:
-    """Serialize library selections without losing their sticky tag metadata."""
+    """Serialize selections with sticky tags, per-job notes, and legacy paths."""
     lines: list[str] = []
     last_tag = ""
     for row in rows:
+        command = str(row.get("command") or "").strip()
+        if not command:
+            url = str(row.get("url") or "").strip()
+            output_dir = str(row.get("output_dir") or "").strip()
+            command = (build_raw_command_from_columns({
+                "url": url, "output_dir": output_dir,
+            }) or "") if output_dir else url
+        if not command:
+            continue
         tag = " ".join(str(row.get("tag") or "").split())
         if tag != last_tag:
             lines.append(f"# {tag}" if tag else "#")
             last_tag = tag
-        command = str(row.get("command") or row.get("url") or "").strip()
-        if command:
-            lines.append(command)
+        notes = " ".join(str(row.get("notes") or "").split())
+        if notes:
+            lines.append(f"#@notes {notes}")
+        lines.append(command)
     return "\n".join(lines)
 
 
@@ -307,6 +325,7 @@ class ManagementMixin:
         self.clipboard_allowed_hosts = ""
         self.close_to_tray = False
         self._force_quit = False
+        self._management_closed = False
         self._last_clipboard_text = ""
         self._management_dialog: QDialog | None = None
         self._runtime_process: QProcess | None = None
@@ -316,6 +335,7 @@ class ManagementMixin:
         # the scheduled run (or immediately when dispatch fails) so automation
         # never replaces unrelated work in the editor/autosave.
         self._scheduled_queue_restore: str | None = None
+        self._scheduled_queue_state: dict | None = None
 
     def _start_management_services(self) -> None:
         self._cleanup_stale_secure_configs()
@@ -341,34 +361,97 @@ class ManagementMixin:
         self.schedule_timer.start(30_000)
         if self.close_to_tray:
             self._ensure_persistent_tray()
-        QTimer.singleShot(600, self._offer_crash_recovery)
+        self._recovery_timer = QTimer(self)
+        self._recovery_timer.setSingleShot(True)
+        self._recovery_timer.timeout.connect(self._offer_crash_recovery)
+        self._recovery_timer.start(600)
 
     # ------------------------------------------------------------------ lifecycle
     def _offer_crash_recovery(self) -> None:
-        if self.active_workers > 0:
+        if getattr(self, "_management_closed", False) is True or self.active_workers > 0:
             return
-        interrupted = self.feature_store.interrupted_runs()
+        try:
+            interrupted = self.feature_store.interrupted_runs()
+        except (OSError, sqlite3.Error) as exc:
+            QMessageBox.warning(self, "Interrupted download", redact_sensitive_text(str(exc)))
+            return
+        owners = {safe_int(row.get("owner_pid"), 0, 0) for row in interrupted}
+        live_owners = {pid for pid in owners if pid and process_is_running(pid)}
+        interrupted = [
+            row for row in interrupted
+            if safe_int(row.get("owner_pid"), 0, 0) not in live_owners
+        ]
         if not interrupted:
             return
-        commands = interrupted_recovery_commands(interrupted)
+        # Recover complete runs within the same limits used by the queue editor.
+        # Resolving an oversized merged queue would otherwise lose the records
+        # when the normal start path rejects it. Deferred runs remain in SQLite.
+        grouped: dict[int, list[dict[str, object]]] = {}
+        for row in interrupted:
+            grouped.setdefault(int(row["run_id"]), []).append(row)
+        selected: list[dict[str, object]] = []
+        job_count = source_rows = 0
+        validation_error = ""
+        for rows in grouped.values():
+            lines = interrupted_recovery_commands(rows)
+            try:
+                jobs = parse_text_database("\n".join(lines))
+                if lines and not jobs:
+                    raise ValueError("The recovery record contains no runnable commands.")
+            except ValueError as exc:
+                validation_error = str(exc)
+                continue
+            # Allow one sticky-tag reset between serialized runs.
+            if job_count + len(jobs) > MAX_QUEUE_JOBS or source_rows + len(lines) + 1 > MAX_QUEUE_SOURCE_ROWS:
+                validation_error = "Remaining interrupted runs exceed the queue safety limits."
+                continue
+            selected.extend(rows)
+            job_count += len(jobs)
+            source_rows += len(lines) + 1
+        if not selected:
+            QMessageBox.warning(self, "Interrupted download", redact_sensitive_text(validation_error))
+            return
+        commands = interrupted_recovery_commands(selected)
+        try:
+            parse_text_database("\n".join(commands))
+        except ValueError as exc:
+            QMessageBox.warning(self, "Interrupted download", redact_sensitive_text(str(exc)))
+            return
+        pending_count = len(interrupted) - len(selected)
+        interrupted = selected
+        unfinished_count = sum(bool(str(row.get("command") or "").strip()) for row in interrupted)
         run_ids: set[int] = set()
         for row in interrupted:
             run_ids.add(int(row["run_id"]))
+
+        def resolve() -> bool:
+            try:
+                self.feature_store.resolve_interrupted_runs(run_ids)
+            except (OSError, sqlite3.Error) as exc:
+                QMessageBox.warning(self, "Interrupted download", redact_sensitive_text(str(exc)))
+                return False
+            return True
+
         if not commands:
-            self.feature_store.resolve_interrupted_runs(run_ids)
+            resolve()
             return
+        pending_message = (
+            f"{pending_count} additional record(s) will remain available for a later recovery.\n\n"
+            if pending_count else ""
+        )
         answer = QMessageBox.question(
             self,
             "Interrupted download",
-            f"The previous session ended while {len(commands)} job(s) were unfinished.\n\n"
-            "Load and resume them now?",
+            f"The previous session ended while {unfinished_count} job(s) were unfinished.\n\n"
+            + pending_message + "Load and resume them now?",
         )
         if answer == QMessageBox.Yes:
             self.txt_commands.setPlainText("\n".join(commands))
             # Resolve only after the recovery queue is safely visible. If the
             # dialog or widget update fails (or the process dies while the
             # prompt is open), the prior run remains recoverable next launch.
-            self.feature_store.resolve_interrupted_runs(run_ids)
+            if not resolve():
+                return
             if any(REDACTED in command for command in commands):
                 QMessageBox.information(
                     self,
@@ -382,7 +465,7 @@ class ManagementMixin:
                     lambda: self._start_download_now(run_source="recovery"),
                 )
         else:
-            self.feature_store.resolve_interrupted_runs(run_ids)
+            resolve()
 
     def _ensure_persistent_tray(self) -> None:
         if self.tray_icon is None:
@@ -420,7 +503,7 @@ class ManagementMixin:
 
     # ------------------------------------------------------------------ clipboard
     def _on_clipboard_changed(self) -> None:
-        if not self.clipboard_inbox_enabled or self.active_workers > 0:
+        if getattr(self, "_management_closed", False) is True or not self.clipboard_inbox_enabled or self.active_workers > 0:
             return
         text = QApplication.clipboard().text().strip()
         if not text or text == self._last_clipboard_text or len(text) > 65_536:
@@ -482,78 +565,105 @@ class ManagementMixin:
         previous = self._scheduled_queue_restore
         if previous is None:
             return False
-        self._scheduled_queue_restore = None
         self.txt_commands.setPlainText(previous)
         # Keep the queue model/table aligned with the restored editor before an
         # autosave or another scheduled poll can observe it.
-        self._rebuild_from_text()
+        state = getattr(self, "_scheduled_queue_state", None)
+        restored = self._restore_queue_state(state) if isinstance(state, dict) else self._rebuild_from_text()
+        if not restored:
+            return False
+        self._scheduled_queue_restore = None
+        self._scheduled_queue_state = None
         self.append_log("[scheduler] restored the previous manual queue")
         return True
 
     def _poll_schedules(self) -> None:
-        if self.active_workers > 0 or (self.delay_timer and self.delay_timer.isActive()):
+        if getattr(self, "_management_closed", False) is True or self.active_workers > 0 or (self.delay_timer and self.delay_timer.isActive()):
             return
-        due = self.feature_store.due_schedules()
-        if not due:
-            return
-        schedule = due[0]
-        command_text = str(schedule.get("command_text") or "").strip()
-        schedule_id = int(schedule["id"])
-        if REDACTED in command_text:
-            # Old databases may contain schedules created before redacted
-            # commands were forced disabled. They can never run: the queue
-            # safety gate rejects the placeholder before account config is
-            # prepared. Disable them once instead of retrying every five
-            # minutes forever.
-            self.feature_store.set_schedule_enabled(schedule_id, False)
-            self.append_log(
-                f"[scheduler] disabled schedule with removed credentials: "
-                f"{schedule.get('name')}"
-            )
-            return
-        next_run = next_schedule_time(schedule)
-        if not command_text:
-            self.feature_store.advance_schedule(schedule_id, next_run)
-            self.append_log(f"[scheduler] skipped empty schedule: {schedule.get('name')}")
-            return
-        raw_account_id = schedule.get("account_profile_id")
-        account_id = safe_int(raw_account_id, 0, 0) or None
-        if raw_account_id not in (None, "") and account_id is None:
-            self.feature_store.defer_schedule(schedule_id, time.time() + 5 * 60)
-            self.append_log(
-                f"[scheduler] invalid account profile for {schedule.get('name')}; "
-                "retrying in 5 minutes"
-            )
-            return
-        self._scheduled_queue_restore = self.txt_commands.toPlainText()
-        self.txt_commands.setPlainText(command_text)
-        self.append_log(f"[scheduler] starting: {schedule.get('name')}")
+        pending = getattr(self, "_pending_schedule_advances", None)
+        if not isinstance(pending, dict):
+            pending = self._pending_schedule_advances = {}
         try:
-            started = self._start_download_now(
-                run_source=f"schedule:{schedule_id}",
-                account_profile_id=account_id,
-                use_account_override=True,
-            )
+            # Retry timestamp writes before selecting due jobs. If a run
+            # started while SQLite was temporarily locked, its stale due time
+            # must not dispatch the same download again after it finishes.
+            for schedule_id, (next_run, ran_at) in list(pending.items()):
+                self.feature_store.advance_schedule(schedule_id, next_run, ran_at=ran_at)
+                del pending[schedule_id]
+            if isinstance(getattr(self, "_scheduled_queue_restore", None), str):
+                if not self._restore_queue_after_scheduled_run():
+                    return
+            due = self.feature_store.due_schedules()
+            if not due:
+                return
+            schedule = due[0]
+            command_text = str(schedule.get("command_text") or "").strip()
+            schedule_id = int(schedule["id"])
+            if REDACTED in command_text:
+                self.feature_store.set_schedule_enabled(schedule_id, False)
+                self.append_log(
+                    f"[scheduler] disabled schedule with removed credentials: "
+                    f"{schedule.get('name')}"
+                )
+                return
+            next_run = next_schedule_time(schedule)
+            if not command_text:
+                self.feature_store.advance_schedule(schedule_id, next_run)
+                self.append_log(f"[scheduler] skipped empty schedule: {schedule.get('name')}")
+                return
+            raw_account_id = schedule.get("account_profile_id")
+            account_id = safe_int(raw_account_id, 0, 0) or None
+            if raw_account_id not in (None, "") and account_id is None:
+                self.feature_store.defer_schedule(schedule_id, time.time() + 5 * 60)
+                self.append_log(
+                    f"[scheduler] invalid account profile for {schedule.get('name')}; "
+                    "retrying in 5 minutes"
+                )
+                return
+            if not self._flush_pending_text_edits():
+                self.feature_store.defer_schedule(schedule_id, time.time() + 5 * 60)
+                self.append_log("[scheduler] manual queue edits could not be parsed; retrying in 5 minutes")
+                return
+            self._scheduled_queue_state = self._capture_queue_state()
+            self._scheduled_queue_restore = self.txt_commands.toPlainText()
+            # A schedule owns its saved text, independently of manual enabled
+            # flags/results even when both queues happen to have identical text.
+            self.jobs = []
+            self.txt_commands.setPlainText(command_text)
+            self.append_log(f"[scheduler] starting: {schedule.get('name')}")
+            try:
+                started = self._start_download_now(
+                    run_source=f"schedule:{schedule_id}",
+                    account_profile_id=account_id,
+                    use_account_override=True,
+                )
+            except Exception as exc:
+                started = self.active_workers > 0
+                state = "workers are active" if started else "no workers became active"
+                self.append_log(
+                    f"[scheduler] unexpected start error for {schedule.get('name')} "
+                    f"({state}): {exc}"
+                )
+            if started:
+                pending[schedule_id] = (next_run, time.time())
+                self.feature_store.advance_schedule(schedule_id, next_run)
+                del pending[schedule_id]
+            else:
+                self._restore_queue_after_scheduled_run()
+                retry_at = time.time() + 5 * 60
+                self.feature_store.defer_schedule(schedule_id, retry_at)
+                self.append_log(
+                    f"[scheduler] start failed; retrying in 5 minutes: {schedule.get('name')}"
+                )
         except Exception as exc:
-            # A Qt timer callback must not leak an exception into the event
-            # loop. If workers became active before a later UI update failed,
-            # retain the scheduled queue and treat the dispatch as started;
-            # otherwise preserve the user's queue and retry shortly.
-            started = self.active_workers > 0
-            state = "workers are active" if started else "no workers became active"
-            self.append_log(
-                f"[scheduler] unexpected start error for {schedule.get('name')} "
-                f"({state}): {exc}"
-            )
-        if started:
-            self.feature_store.advance_schedule(schedule_id, next_run)
-        else:
-            self._restore_queue_after_scheduled_run()
-            retry_at = time.time() + 5 * 60
-            self.feature_store.defer_schedule(schedule_id, retry_at)
-            self.append_log(
-                f"[scheduler] start failed; retrying in 5 minutes: {schedule.get('name')}"
-            )
+            # Database failures must not escape a Qt timer callback. Keep an
+            # active scheduled run's queue intact until its workers finish.
+            if self.active_workers <= 0 and getattr(self, "_scheduled_queue_restore", None) is not None:
+                try:
+                    self._restore_queue_after_scheduled_run()
+                except Exception as restore_error:
+                    self.append_log(f"[scheduler] queue restore failed: {restore_error}")
+            self.append_log(f"[scheduler] dispatch failed; will retry: {redact_sensitive_text(str(exc))}")
 
     # ------------------------------------------------------------ secure profiles
     def prepare_active_account_config(
@@ -561,9 +671,11 @@ class ManagementMixin:
         account_profile_id: int | None = None,
         *,
         use_active_default: bool = True,
+        for_preview: bool = False,
     ) -> str | None:
         """Create a short-lived merged config for the selected account profile."""
-        self.cleanup_run_account_config()
+        if not for_preview:
+            self.cleanup_run_account_config()
         selected_account_id = (
             self.active_account_profile_id if use_active_default else account_profile_id
         )
@@ -575,10 +687,11 @@ class ManagementMixin:
         if not profile:
             return None
         base: dict[str, object] = {}
-        active_config = Path(self.config_path).expanduser() if self.config_path else None
+        active_config = safe_expand_path(self.config_path) if self.config_path else None
         if active_config and active_config.is_file():
             try:
                 loaded = json.loads(read_text_safely(active_config))
+                validate_finite_numbers(loaded)
             except (OSError, ValueError) as exc:
                 raise RuntimeError(f"Active config cannot be merged with the account profile: {exc}") from exc
             if not isinstance(loaded, dict):
@@ -602,8 +715,12 @@ class ManagementMixin:
             raise RuntimeError("The selected OAuth profile has no private cache path")
         auth_keys = set(MANAGED_AUTH_KEYS)
         auth_keys.add(str(profile.get("secret_key") or "api-key"))
+        # OAuth application keys identify the client and its cache namespace;
+        # removing them prevents Flickr (and custom OAuth clients) from using
+        # the tokens issued during Connect OAuth. Only clear user credentials.
+        application_keys = {"api-key", "api-secret", "client-id", "client-secret"} if auth_kind == "oauth" else set()
         for key in list(site_config):
-            if key in auth_keys or is_sensitive_option_key(key):
+            if key not in application_keys and (key in auth_keys or is_sensitive_option_key(key)):
                 site_config.pop(key, None)
         if auth_kind == "browser":
             source = str(profile.get("cookie_source") or "chrome")
@@ -612,7 +729,7 @@ class ManagementMixin:
             source = str(profile.get("cookie_source") or "")
             if not source:
                 raise RuntimeError("The selected cookies.txt profile has no file path")
-            cookie_path = Path(source).expanduser()
+            cookie_path = safe_expand_path(source)
             if not cookie_path.is_file():
                 raise RuntimeError(f"The selected cookies.txt file does not exist: {cookie_path}")
             site_config["cookies"] = str(cookie_path)
@@ -629,19 +746,22 @@ class ManagementMixin:
                 site_config["username"] = username
                 site_config["password"] = secret
             elif auth_kind == "api_key":
+                if username:
+                    site_config["username"] = username
                 site_config[str(profile.get("secret_key") or "api-key")] = secret
             else:
                 raise RuntimeError(f"Unsupported account authentication method: {auth_kind}")
         SECURE_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-        path = SECURE_RUNTIME_DIR / f"secure-config-{uuid.uuid4().hex}.json"
+        path = SECURE_RUNTIME_DIR / f"secure-config-{os.getpid()}-{uuid.uuid4().hex}.json"
         atomic_write_text(
             path,
             json.dumps(base, ensure_ascii=False, indent=2),
             encoding="utf-8",
             mode=stat.S_IRUSR | stat.S_IWUSR,
         )
-        self._run_config_path = str(path)
-        return self._run_config_path
+        if not for_preview:
+            self._run_config_path = str(path)
+        return str(path)
 
     def cleanup_run_account_config(self) -> None:
         path = getattr(self, "_run_config_path", None)
@@ -656,39 +776,57 @@ class ManagementMixin:
         if not SECURE_RUNTIME_DIR.exists():
             return
         for path in SECURE_RUNTIME_DIR.glob("secure-config-*.json"):
+            owner = re.fullmatch(r"secure-config-(\d+)-[0-9a-f]{32}\.json", path.name)
+            if owner and process_is_running(int(owner.group(1))):
+                continue
             try:
                 path.unlink()
             except OSError:
                 pass
 
     # ---------------------------------------------------------------- dialog shell
+    def open_queue_options(self) -> None:
+        dialog = QDialog(self)
+        dialog.setObjectName("queueOptionsDialog")
+        ind = self._ui_is_indonesian()
+        dialog.setWindowTitle("Opsi untuk antrean saat ini" if ind else "Options for the current queue")
+        dialog.resize(950, 680)
+        layout = QVBoxLayout(dialog)
+        note = QLabel("Opsi di sini ditambahkan ke input antrean saat ini. Untuk pengaturan situs yang tersimpan, buka Config." if ind else "Options here are added to the current queue input. Open Config for saved website settings.")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        layout.addWidget(self._build_options_tab(), 1)
+        close = QPushButton("Tutup" if ind else "Close")
+        close.clicked.connect(dialog.accept)
+        layout.addWidget(close, 0, Qt.AlignRight)
+        dialog.exec()
+
     def open_management_center(self) -> None:
         if self._management_dialog is not None and self._management_dialog.isVisible():
             self._management_dialog.raise_()
             self._management_dialog.activateWindow()
             return
         dialog = QDialog(self)
-        dialog.setWindowTitle("Library & Automation Center")
+        ind = self._ui_is_indonesian()
+        tr = lambda en, id_text: id_text if ind else en
+        dialog.setObjectName("managementCenter")
+        dialog.setWindowTitle(tr("Manage application, library and accounts", "Kelola aplikasi, library dan akun"))
         dialog.resize(980, 700)
         dialog.setMinimumSize(820, 600)
         root = QVBoxLayout(dialog)
-        intro = QLabel(
-            "Persistent archive library, recurring schedules, Clipboard Inbox, secure account profiles, "
-            + ("installed-version options, and the included gallery-dl." if getattr(sys, "frozen", False)
-               else "installed-version options, and an isolated gallery-dl runtime.")
-        )
+        intro = QLabel(tr("Manage files and backups, saved links, schedules, clipboard URLs and accounts. Saved download settings are in Config; current job filters are in Queue tools.", "Kelola file dan backup, tautan tersimpan, jadwal, URL clipboard dan akun. Pengaturan unduhan tersimpan ada di Config; filter job saat ini ada di Alat Antrean."))
         intro.setWordWrap(True)
         intro.setObjectName("subtle")
         root.addWidget(intro)
         tabs = QTabWidget()
+        tabs.setObjectName("managementTabs")
         root.addWidget(tabs, 1)
+        tabs.addTab(self._build_application_tab(), tr("Application and Files", "Aplikasi dan File"))
         tabs.addTab(self._build_library_tab(), "Library")
-        tabs.addTab(self._build_scheduler_tab(), "Scheduler")
-        tabs.addTab(self._build_inbox_tab(), "URL Inbox")
-        tabs.addTab(self._build_accounts_tab(), "Accounts")
-        tabs.addTab(self._build_options_tab(), "Options & Filters")
-        tabs.addTab(self._build_runtime_tab(), "Runtime")
-        close = QPushButton("Close")
+        tabs.addTab(self._build_scheduler_tab(), tr("Schedules", "Jadwal"))
+        tabs.addTab(self._build_inbox_tab(), tr("Clipboard URLs", "URL Clipboard"))
+        tabs.addTab(self._build_accounts_tab(), tr("Accounts / Login", "Akun / Login"))
+        close = QPushButton(tr("Close", "Tutup"))
         close.clicked.connect(dialog.accept)
         root.addWidget(close, 0, Qt.AlignRight)
         self._management_dialog = dialog
@@ -725,7 +863,11 @@ class ManagementMixin:
         layout.addWidget(table, 1)
 
         def refresh() -> None:
-            rows = self.feature_store.list_library(search.text())
+            try:
+                rows = self.feature_store.list_library(search.text())
+            except (OSError, sqlite3.Error) as exc:
+                QMessageBox.warning(page, "Library", redact_sensitive_text(str(exc)))
+                return
             table.setRowCount(len(rows))
             for row_index, record in enumerate(rows):
                 values = [
@@ -741,16 +883,21 @@ class ManagementMixin:
             redacted_count = sum(
                 redact_sensitive_text(job.raw) != job.raw for job in self.jobs
             )
-            for job in self.jobs:
-                self.feature_store.add_library_entry(
-                    url=job.url,
-                    title=job.ident if job.ident != "-" else "",
-                    service=job.service,
-                    tag=job.tag,
-                    output_dir=job.dest if job.dest != "-" else "",
-                    account_profile_id=self.active_account_profile_id,
-                    command=job.raw,
-                )
+            try:
+                self.feature_store.add_library_entries([
+                    dict(
+                        url=job.url,
+                        title=job.ident if job.ident != "-" else "",
+                        service=job.service, tag=job.tag, notes=job.notes,
+                        output_dir=job.dest if job.dest != "-" else "",
+                        account_profile_id=self.active_account_profile_id,
+                        command=job.raw,
+                    )
+                    for job in self.jobs
+                ])
+            except (OSError, ValueError, sqlite3.Error) as exc:
+                QMessageBox.warning(page, "Library", redact_sensitive_text(str(exc)))
+                return
             refresh()
             self.append_log(f"[library] imported {len(self.jobs)} current job(s)")
             if redacted_count:
@@ -769,10 +916,16 @@ class ManagementMixin:
                 QMessageBox.information(page, "Library", "Wait for the current download to finish before replacing the queue.")
                 return
             selected = set(selected_ids())
-            records = [row for row in self.feature_store.list_library(search.text()) if int(row["id"]) in selected]
+            try:
+                records = [row for row in self.feature_store.list_library(search.text()) if int(row["id"]) in selected]
+                command_text = library_records_to_database_text(records)
+                parse_text_database(command_text)
+            except (OSError, ValueError, sqlite3.Error) as exc:
+                QMessageBox.warning(page, "Library", redact_sensitive_text(str(exc)))
+                return
             if not records:
                 return
-            self.txt_commands.setPlainText(library_records_to_database_text(records))
+            self.txt_commands.setPlainText(command_text)
             self.active_account_profile_id = common_account_profile_id(records)
             if not self._rebuild_from_text():
                 return
@@ -782,7 +935,11 @@ class ManagementMixin:
         import_current.clicked.connect(import_queue)
         queue_selected.clicked.connect(queue_rows)
         def delete_rows() -> None:
-            self.feature_store.delete_library_entries(selected_ids())
+            try:
+                self.feature_store.delete_library_entries(selected_ids())
+            except (OSError, sqlite3.Error) as exc:
+                QMessageBox.warning(page, "Library", redact_sensitive_text(str(exc)))
+                return
             refresh()
 
         delete_selected.clicked.connect(delete_rows)
@@ -848,24 +1005,33 @@ class ManagementMixin:
         current_id: list[int | None] = [None]
 
         def refresh() -> None:
-            rows = self.feature_store.list_schedules()
-            account_names = {
-                int(record["id"]): str(record["name"])
-                for record in self.feature_store.list_accounts()
-            }
-            table.setRowCount(len(rows))
-            for row_index, record in enumerate(rows):
-                next_text = format_schedule_timestamp(record.get("next_run_at"))
-                if record.get("account_profile_id"):
-                    account_name = account_names.get(
-                        int(record["account_profile_id"]),
-                        "Missing profile",
-                    )
-                else:
-                    account_name = "None"
-                values = [record["id"], "Yes" if record["enabled"] else "No", record["name"], record["frequency"], next_text, account_name, len(str(record["command_text"]).splitlines())]
-                for column, value in enumerate(values):
-                    table.setItem(row_index, column, QTableWidgetItem(str(value)))
+            try:
+                rows = self.feature_store.list_schedules()
+                account_names = {
+                    int(record["id"]): str(record["name"])
+                    for record in self.feature_store.list_accounts()
+                }
+            except (OSError, sqlite3.Error) as exc:
+                QMessageBox.warning(page, "Schedule", redact_sensitive_text(str(exc)))
+                return
+            with QSignalBlocker(table):
+                table.setRowCount(len(rows))
+                table.clearSelection()
+                table.setCurrentCell(-1, -1)
+                for row_index, record in enumerate(rows):
+                    next_text = format_schedule_timestamp(record.get("next_run_at"))
+                    if record.get("account_profile_id"):
+                        account_name = account_names.get(
+                            int(record["account_profile_id"]),
+                            "Missing profile",
+                        )
+                    else:
+                        account_name = "None"
+                    values = [record["id"], "Yes" if record["enabled"] else "No", record["name"], record["frequency"], next_text, account_name, len(str(record["command_text"]).splitlines())]
+                    for column, value in enumerate(values):
+                        table.setItem(row_index, column, QTableWidgetItem(str(value)))
+                    if int(record["id"]) == current_id[0]:
+                        table.selectRow(row_index)
 
         def clear_form() -> None:
             current_id[0] = None
@@ -876,8 +1042,15 @@ class ManagementMixin:
         def load_selected() -> None:
             if table.currentRow() < 0:
                 return
-            item_id = int(table.item(table.currentRow(), 0).text())
-            record = next((item for item in self.feature_store.list_schedules() if int(item["id"]) == item_id), None)
+            selected_item = table.item(table.currentRow(), 0)
+            if selected_item is None:
+                return
+            item_id = int(selected_item.text())
+            try:
+                record = next((item for item in self.feature_store.list_schedules() if int(item["id"]) == item_id), None)
+            except (OSError, sqlite3.Error) as exc:
+                QMessageBox.warning(page, "Schedule", redact_sensitive_text(str(exc)))
+                return
             if not record:
                 return
             current_id[0] = item_id
@@ -895,8 +1068,11 @@ class ManagementMixin:
 
         def save() -> None:
             raw_commands = commands.toPlainText()
-            if not raw_commands.strip():
-                QMessageBox.warning(page, "Schedule", "The schedule queue cannot be empty.")
+            try:
+                if not parse_text_database(raw_commands):
+                    raise ValueError("The schedule queue must contain at least one runnable job.")
+            except ValueError as exc:
+                QMessageBox.warning(page, "Schedule", redact_sensitive_text(str(exc)))
                 return
             safe_commands = redact_sensitive_database_text(raw_commands)
             if safe_commands != raw_commands:
@@ -921,14 +1097,18 @@ class ManagementMixin:
             try:
                 values["next_run_at"] = next_schedule_time(values)
                 current_id[0] = self.feature_store.save_schedule(values, current_id[0])
-            except (OSError, ValueError) as exc:
+            except (OSError, ValueError, sqlite3.Error) as exc:
                 QMessageBox.warning(page, "Schedule", redact_sensitive_text(str(exc)))
                 return
             refresh()
 
         def delete() -> None:
             if current_id[0]:
-                self.feature_store.delete_schedules([current_id[0]])
+                try:
+                    self.feature_store.delete_schedules([current_id[0]])
+                except (OSError, sqlite3.Error) as exc:
+                    QMessageBox.warning(page, "Schedule", redact_sensitive_text(str(exc)))
+                    return
                 clear_form()
                 refresh()
 
@@ -1223,6 +1403,9 @@ class ManagementMixin:
         stop_button.setEnabled(False)
         cache_button = QPushButton("Cache Tools")
         cache_button.setObjectName("accountCacheButton")
+        # The native Windows menu-button style expects a positive point size.
+        # The general pixel-size stylesheet makes pointSize() return -1.
+        cache_button.setStyleSheet("font-size: 9pt;")
         clear_site_cache = QPushButton("Clear Site Cache")
         clear_site_cache.setObjectName("accountClearSiteCacheButton")
         clear_secret_button = QPushButton("Forget Password / Token")
@@ -1294,26 +1477,44 @@ class ManagementMixin:
                 site.blockSignals(False)
 
         def refresh() -> None:
-            rows = self.feature_store.list_accounts()
-            table.setRowCount(len(rows))
-            for row_index, record in enumerate(rows):
-                auth_kind = str(record["auth_kind"])
-                if auth_kind in {"browser", "cookies_file"}:
-                    detail = record["cookie_source"]
-                elif auth_kind == "oauth":
-                    detail = record.get("oauth_instance") or "Browser authorization"
-                else:
-                    detail = record["username"] or "Stored securely"
-                values = [
-                    record["id"],
-                    "Yes" if int(record["id"]) == self.active_account_profile_id else "",
-                    record["name"],
-                    record["site"],
-                    ACCOUNT_AUTH_LABELS.get(auth_kind, auth_kind),
-                    detail,
-                ]
-                for column, value in enumerate(values):
-                    table.setItem(row_index, column, QTableWidgetItem(str(value)))
+            try:
+                rows = self.feature_store.list_accounts()
+            except (OSError, sqlite3.Error) as exc:
+                QMessageBox.warning(page, "Account profile", redact_sensitive_text(str(exc)))
+                return
+            # Repainting sorted rows must not load another profile into the
+            # editor while its cells are only partially replaced.
+            with QSignalBlocker(table):
+                table.setRowCount(len(rows))
+                table.clearSelection()
+                table.setCurrentCell(-1, -1)
+                for row_index, record in enumerate(rows):
+                    auth_kind = str(record["auth_kind"])
+                    if auth_kind in {"browser", "cookies_file"}:
+                        detail = record["cookie_source"]
+                    elif auth_kind == "oauth":
+                        detail = record.get("oauth_instance") or "Browser authorization"
+                    else:
+                        detail = record["username"] or "Stored securely"
+                    values = [
+                        record["id"],
+                        "Yes" if int(record["id"]) == self.active_account_profile_id else "",
+                        record["name"],
+                        record["site"],
+                        ACCOUNT_AUTH_LABELS.get(auth_kind, auth_kind),
+                        detail,
+                    ]
+                    for column, value in enumerate(values):
+                        table.setItem(row_index, column, QTableWidgetItem(str(value)))
+                    if int(record["id"]) == current_id[0]:
+                        table.selectRow(row_index)
+
+        def read_account(account_id: int | None) -> dict[str, object] | None:
+            try:
+                return self.feature_store.account(account_id)
+            except (OSError, sqlite3.Error) as exc:
+                QMessageBox.warning(page, "Account profile", redact_sensitive_text(str(exc)))
+                return None
 
         def clear_form() -> None:
             current_id[0] = None
@@ -1343,8 +1544,11 @@ class ManagementMixin:
         def load_selected() -> None:
             if table.currentRow() < 0:
                 return
-            account_id = int(table.item(table.currentRow(), 0).text())
-            record = self.feature_store.account(account_id)
+            item = table.item(table.currentRow(), 0)
+            if item is None:
+                return
+            account_id = int(item.text())
+            record = read_account(account_id)
             if not record:
                 return
             current_id[0] = account_id
@@ -1403,7 +1607,7 @@ class ManagementMixin:
                     QMessageBox.warning(page, "OAuth", str(exc))
                     return False
             if auth_kind == "cookies_file":
-                path = Path(cookie_file.text().strip()).expanduser()
+                path = safe_expand_path(cookie_file.text().strip())
                 valid, message = validate_cookies_txt(str(path))
                 if not valid:
                     QMessageBox.warning(page, "cookies.txt", message)
@@ -1450,7 +1654,7 @@ class ManagementMixin:
                     QMessageBox.warning(page, "Browser cookies", str(exc))
                     return False
             elif auth_kind == "cookies_file":
-                cookie_source = str(Path(cookie_file.text().strip()).expanduser())
+                cookie_source = str(safe_expand_path(cookie_file.text().strip()))
             else:
                 cookie_source = ""
             values = {
@@ -1471,7 +1675,7 @@ class ManagementMixin:
                     try:
                         if old_reference and reference == old_reference and previous_secret is not None:
                             self.secret_vault.set(old_reference, previous_secret)
-                        elif reference != old_reference:
+                        else:
                             self.secret_vault.delete(reference)
                     except Exception:
                         pass
@@ -1502,7 +1706,7 @@ class ManagementMixin:
 
         def activate() -> None:
             if current_id[0]:
-                record = self.feature_store.account(current_id[0])
+                record = read_account(current_id[0])
                 if not record:
                     return
                 auth_kind = str(record.get("auth_kind") or "")
@@ -1515,7 +1719,7 @@ class ManagementMixin:
                     if not available:
                         QMessageBox.warning(page, "Account profile", "This profile has no stored password/token. Enter it and save first.")
                         return
-                if auth_kind == "oauth" and not Path(str(record.get("cache_file") or "")).is_file():
+                if auth_kind == "oauth" and not safe_expand_path(str(record.get("cache_file") or "")).is_file():
                     QMessageBox.warning(page, "OAuth", "Connect OAuth first; this profile does not have an OAuth cache yet.")
                     return
                 self.active_account_profile_id = current_id[0]
@@ -1563,7 +1767,7 @@ class ManagementMixin:
                 return
             if not current_id[0] and not save():
                 return
-            record = self.feature_store.account(current_id[0])
+            record = read_account(current_id[0])
             if not record:
                 return
             if action == "oauth" and str(record.get("auth_kind")) != "oauth":
@@ -1579,11 +1783,15 @@ class ManagementMixin:
                 if answer != QMessageBox.Yes:
                     return
             try:
-                cache_path = str(record.get("cache_file") or "")
+                raw_cache_path = str(record.get("cache_file") or "").strip()
+                if not raw_cache_path:
+                    raise ValueError("The account profile has no private cache path")
+                cache_path = str(safe_expand_path(raw_cache_path))
                 Path(cache_path).parent.mkdir(parents=True, exist_ok=True)
                 config_path = str(self.config_path or "")
-                if config_path and not Path(config_path).expanduser().is_file():
-                    config_path = ""
+                if config_path:
+                    expanded_config = safe_expand_path(config_path)
+                    config_path = str(expanded_config) if expanded_config.is_file() else ""
                 argv = account_action_argv(
                     self.gdl_cmd or "gallery-dl",
                     action,
@@ -1654,7 +1862,7 @@ class ManagementMixin:
 
         def use_new_cache() -> None:
             category = selected_site() or "account"
-            if current_cache[0] and Path(current_cache[0]).is_file():
+            if current_cache[0] and safe_expand_path(current_cache[0]).is_file():
                 answer = QMessageBox.question(
                     page,
                     "Use a new private cache",
@@ -1686,7 +1894,9 @@ class ManagementMixin:
             ) != QMessageBox.Yes:
                 return
             old_reference = current_ref[0]
-            record = self.feature_store.account(current_id[0]) or {}
+            record = read_account(current_id[0])
+            if not record:
+                return
             try:
                 record["secret_ref"] = ""
                 self.feature_store.save_account(record, current_id[0])
@@ -1717,7 +1927,11 @@ class ManagementMixin:
             ) != QMessageBox.Yes:
                 return
             cache_path = current_cache[0]
-            references = self.feature_store.delete_accounts([current_id[0]])
+            try:
+                references = self.feature_store.delete_accounts([current_id[0]])
+            except (OSError, sqlite3.Error) as exc:
+                QMessageBox.warning(page, "Account profile", redact_sensitive_text(str(exc)))
+                return
             cleanup_errors: list[str] = []
             for reference in references:
                 try:
@@ -1726,7 +1940,7 @@ class ManagementMixin:
                     cleanup_errors.append(redact_sensitive_text(str(exc)))
             if cache_path:
                 try:
-                    resolved = Path(cache_path).resolve()
+                    resolved = safe_expand_path(cache_path).resolve()
                     if resolved.parent == ACCOUNT_CACHE_DIR.resolve():
                         resolved.unlink(missing_ok=True)
                 except OSError as exc:
@@ -1892,22 +2106,34 @@ class ManagementMixin:
             if needs_value and not value.text().strip():
                 QMessageBox.warning(page, "Option", f"{flag} requires a value.")
                 return
-            extra = flag
-            if needs_value:
-                extra += " " + quote_arg_for_preview(value.text().strip())
-            self.txt_commands.setPlainText(
-                append_extra_args_to_database_text(self.txt_commands.toPlainText(), extra)
-            )
-            if not self._rebuild_from_text():
+            parts = [flag]
+            raw_value = value.text().strip()
+            if needs_value or (raw_value and flag in GALLERY_DL_OPTION_VALUE_COUNTS):
+                count = GALLERY_DL_OPTION_VALUE_COUNTS.get(flag, 1)
+                values = split_command(raw_value) if count > 1 else [raw_value]
+                if len(values) != count:
+                    QMessageBox.warning(page, "Option", f"{flag} requires {count} values. Quote values containing spaces.")
+                    return
+                parts.extend(values)
+            apply_queue_arguments(" ".join(quote_arg_for_preview(part) for part in parts), "Option")
+
+        def apply_queue_arguments(extra: str, title: str) -> None:
+            candidate = append_extra_args_to_database_text(self.txt_commands.toPlainText(), extra)
+            try:
+                parse_text_database(candidate)
+            except ValueError as exc:
+                QMessageBox.warning(page, title, redact_sensitive_text(str(exc)))
                 return
+            self.txt_commands.setPlainText(candidate)
+            self._rebuild_from_text()
 
         search.textChanged.connect(refresh_catalog)
         apply_button.clicked.connect(apply_option)
         refresh_catalog()
-        command = command_string_to_argv(self.gdl_cmd or "gallery-dl")
+        command = insert_gallery_dl_arguments(command_string_to_argv(self.gdl_cmd or "gallery-dl"), ["--help"])
         if command:
             catalog_process.finished.connect(catalog_finished)
-            catalog_process.start(command[0], [*command[1:], "--help"])
+            catalog_process.start(command[0], command[1:])
             catalog_timeout.start(8_000)
 
         filter_page = QWidget()
@@ -1968,11 +2194,7 @@ class ManagementMixin:
             if not expression:
                 return
             extra = "--filter " + quote_arg_for_preview(expression)
-            self.txt_commands.setPlainText(
-                append_extra_args_to_database_text(self.txt_commands.toPlainText(), extra)
-            )
-            if not self._rebuild_from_text():
-                return
+            apply_queue_arguments(extra, "Filter")
 
         build_button.clicked.connect(build)
         copy_button.clicked.connect(lambda: QApplication.clipboard().setText(build()))
@@ -1981,6 +2203,10 @@ class ManagementMixin:
         return page
 
     # --------------------------------------------------------------------- runtime
+    def _build_application_tab(self) -> QWidget:
+        from .application_tools import build_application_tools
+        return build_application_tools(self)
+
     def _managed_python(self) -> Path:
         return MANAGED_VENV_DIR / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 
@@ -1991,7 +2217,8 @@ class ManagementMixin:
         page = QWidget()
         layout = QVBoxLayout(page)
         frozen = bool(getattr(sys, "frozen", False))
-        current = QLabel(f"gallery-dl in use: {self.gdl_cmd or 'not found'}")
+        current = QLabel(f"gallery-dl in use: {redact_sensitive_text(self.gdl_cmd or 'not found')}")
+        current.setTextFormat(Qt.PlainText)
         current.setWordWrap(True)
         if frozen:
             note = QLabel(

@@ -72,6 +72,8 @@ def local_oauth_callback_url(site: str, response: str) -> str:
     required = {"oauth_token", "oauth_verifier"} if site in OAUTH1_SITES else {"state", "code"}
     if not required.issubset(query):
         raise ValueError("Callback URL is missing " + ", ".join(sorted(required - query.keys())))
+    if any(len(query[key]) != 1 or not query[key][0].strip() for key in required):
+        raise ValueError("Callback URL must contain one non-empty value for each required parameter")
     # gallery-dl's local OAuth server reads at most 1024 bytes of the HTTP
     # request. Leave room for the request line and headers.
     if len(parsed.query) > 900 or not parsed.query.isascii():

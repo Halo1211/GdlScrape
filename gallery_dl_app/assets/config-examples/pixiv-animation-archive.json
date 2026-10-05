@@ -1,0 +1,21 @@
+{
+    "extractor": {
+        "base-directory": "./downloads",
+        "pixiv": {
+            "include": ["artworks"],
+            "ugoira": "original",
+            "postprocessor-options": {
+                "keep-files": true
+            },
+            "postprocessors": ["animation-archive"]
+        }
+    },
+    "postprocessor": {
+        "animation-archive": {
+            "name": "ugoira",
+            "mode": "archive",
+            "extension": "zip",
+            "metadata": true
+        }
+    }
+}

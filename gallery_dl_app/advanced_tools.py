@@ -1458,6 +1458,8 @@ Debug:
         if self.active_workers > 0:
             self.show_compact_message("Resume", "Wait until the current run finishes before resuming unfinished jobs.", "info")
             return
+        if not self._flush_pending_text_edits():
+            return
         # Honor the per-row enabled flag, matching Start's current_run_indices().
         # Without the filter, Resume queued rows the user explicitly disabled.
         idxs = [i for i, job in enumerate(self.jobs) if job.enabled and i not in self.done_indices]
@@ -1467,11 +1469,11 @@ Debug:
         self._start_indices(idxs, reset_result_sets=False)
 
     def save_project_profile(self) -> None:
-        app_data_dir()
-        path, _ = QFileDialog.getSaveFileName(self, "Save project profile", str(PROFILES_DIR / f"profile_{timestamp_slug()}.json"), "JSON (*.json)")
-        if not path:
-            return
         try:
+            app_data_dir()
+            path, _ = QFileDialog.getSaveFileName(self, "Save project profile", str(PROFILES_DIR / f"profile_{timestamp_slug()}.json"), "JSON (*.json)")
+            if not path:
+                return
             data = self.session_data()
             data["profile_saved_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
             atomic_write_text(path, json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -1483,11 +1485,11 @@ Debug:
         if self.active_workers > 0:
             self.show_compact_message("Project Profile", "Stop the current download before loading a project profile.", "info")
             return
-        app_data_dir()
-        path, _ = QFileDialog.getOpenFileName(self, "Load project profile", str(PROFILES_DIR), "JSON (*.json);;All files (*.*)")
-        if not path:
-            return
         try:
+            app_data_dir()
+            path, _ = QFileDialog.getOpenFileName(self, "Load project profile", str(PROFILES_DIR), "JSON (*.json);;All files (*.*)")
+            if not path:
+                return
             data = json.loads(read_text_safely(path))
             if not isinstance(data, dict):
                 raise ValueError("Profile must contain a JSON object.")
@@ -1517,15 +1519,15 @@ Debug:
         self.autosave_session()
 
     def export_settings_snapshot(self) -> None:
-        app_data_dir()
-        data = self.session_data()
-        path, _ = QFileDialog.getSaveFileName(self, "Export settings snapshot", str(APP_DIR / f"settings_snapshot_{timestamp_slug()}.json"), "JSON (*.json)")
-        if path:
-            try:
+        try:
+            app_data_dir()
+            data = self.session_data()
+            path, _ = QFileDialog.getSaveFileName(self, "Export settings snapshot", str(APP_DIR / f"settings_snapshot_{timestamp_slug()}.json"), "JSON (*.json)")
+            if path:
                 atomic_write_text(path, json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
                 self.show_compact_message("Settings Snapshot", f"Settings exported:\n{path}", "info")
-            except Exception as exc:
-                self.show_compact_message("Settings Snapshot failed", str(exc), "error")
+        except Exception as exc:
+            self.show_compact_message("Settings Snapshot failed", str(exc), "error")
 
     def write_history(self, idx: int, result: JobResult) -> None:
         try:
@@ -1551,10 +1553,10 @@ Debug:
                 reporter("writing history", exc)
 
     def load_history_table(self) -> None:
-        self.tbl_history.setRowCount(0)
         try:
             records = self.feature_store.list_history(limit=500)
-        except Exception:
+        except Exception as exc:
+            self.show_compact_message("History refresh failed", redact_sensitive_text(str(exc)), "error")
             return
         self.tbl_history.setRowCount(len(records))
         for row, rec in enumerate(records):
@@ -1567,7 +1569,11 @@ Debug:
     def clear_history(self) -> None:
         res = QMessageBox.question(self, "Clear history", "Delete saved job history?")
         if res == QMessageBox.Yes:
-            self.feature_store.clear_history()
+            try:
+                self.feature_store.clear_history()
+            except Exception as exc:
+                self.show_compact_message("Clear history failed", redact_sensitive_text(str(exc)), "error")
+                return
             self.load_history_table()
 
     def notify_finished(self) -> None:
@@ -1715,6 +1721,8 @@ Debug:
         dlg.exec()
 
     def group_queue_dialog(self) -> None:
+        if self.active_workers <= 0 and not self._flush_pending_text_edits():
+            return
         if not self.jobs:
             self.show_compact_message("Group Queue", "No queue rows to analyze.", "info")
             return
@@ -1767,17 +1775,22 @@ Debug:
         if not self.jobs:
             self.show_compact_message("Dry-run Validator", "No queue rows to validate.", "info")
             return
-        # Pure command-builder use, mirroring final_command_for_job: private
-        # events/cancel-set (never mutate live run state), Qt-owned lifetime.
-        dummy_q: queue.Queue = queue.Queue()
-        validator = DownloadWorker(
-            0, dummy_q, self.gdl_cmd or "gallery-dl", self.config_path, self.edit_output.text().strip(),
-            self.combo_cookies.currentText(), self.spin_retries.value(), "", threading.Event(), threading.Event(),
-            set(), False, "zip", False, self.service_policy, {}, None, self,
-        )
-        errors: list[str] = []
-        previews: list[str] = []
+        account_config = None
+        validator = None
         try:
+            if self.active_account_profile_id:
+                account_config = self.prepare_active_account_config(for_preview=True)
+            # Pure command builder with private events and Qt-owned lifetime.
+            dummy_q: queue.Queue = queue.Queue()
+            validator = DownloadWorker(
+                0, dummy_q, self.gdl_cmd or "gallery-dl", account_config or self.config_path,
+                self.edit_output.text().strip(),
+                "none" if self.active_account_profile_id else self.combo_cookies.currentText(),
+                self.spin_retries.value(), "", threading.Event(), threading.Event(),
+                set(), False, "zip", False, self.service_policy, {}, None, self,
+            )
+            errors: list[str] = []
+            previews: list[str] = []
             for i, job in enumerate(self.jobs):
                 try:
                     cmd = validator.build_command(job)
@@ -1794,14 +1807,24 @@ Debug:
                         errors.append(f"#{i+1}: no HTTP/HTTPS URL detected")
                     previews.append(f"#{i+1}: " + " ".join(quote_arg_for_preview(x) for x in redact_sensitive_argv(cmd)[:14]))
                 except Exception as exc:
-                    errors.append(f"#{i+1}: {exc}")
+                    errors.append(f"#{i+1}: {redact_sensitive_text(str(exc))}")
+            msg = f"Checked rows: {len(self.jobs)}\nProblems: {len(errors)}\n\n"
+            if errors:
+                msg += "Problems:\n" + "\n".join(errors[:80]) + "\n\n"
+            msg += "Preview:\n" + "\n".join(previews[:40])
+            if account_config:
+                msg += "\n\nThe account config path shown is valid only while this preview is open."
+            self.show_scroll_message("Dry-run Validator", msg, "warning" if errors else "info")
+        except Exception as exc:
+            self.show_compact_message("Dry-run Validator", redact_sensitive_text(str(exc)), "error")
         finally:
-            validator.deleteLater()
-        msg = f"Checked rows: {len(self.jobs)}\nProblems: {len(errors)}\n\n"
-        if errors:
-            msg += "Problems:\n" + "\n".join(errors[:80]) + "\n\n"
-        msg += "Preview:\n" + "\n".join(previews[:40])
-        self.show_scroll_message("Dry-run Validator", msg, "warning" if errors else "info")
+            if account_config:
+                try:
+                    Path(account_config).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            if validator is not None:
+                validator.deleteLater()
 
     def apply_output_folder_by_tag(self) -> None:
         if self.active_workers > 0:
@@ -1837,10 +1860,16 @@ Debug:
         if not changed:
             self.show_compact_message("Output Folder per Tag", "No tagged rows without destination were found.", "info")
             return
+        candidate = "\n".join(new_lines)
+        try:
+            parse_text_database(candidate)
+        except ValueError as exc:
+            self.show_compact_message("Output Folder per Tag", str(exc), "error")
+            return
         res = QMessageBox.question(self, "Output Folder per Tag", f"Apply tag-based destination to {changed} row(s)?")
         if res != QMessageBox.Yes:
             return
-        self.txt_commands.setPlainText("\n".join(new_lines))
+        self.txt_commands.setPlainText(candidate)
         self.append_log(f"[queue] applied output folder per tag to {changed} row(s)")
 
     def archive_path_assistant(self) -> None:
@@ -2042,8 +2071,9 @@ Debug:
         # Only stop UI timers after every background component has confirmed
         # shutdown. If shutdown had to be delayed above, the live window keeps
         # its debounce, log flush, ETA, and delayed-start behavior intact.
+        self._management_closed = True
         for timer_name in (
-            "delay_timer", "_text_debounce", "_log_flush_timer", "eta_timer",
+            "delay_timer", "_text_debounce", "_log_flush_timer", "eta_timer", "_recovery_timer",
         ):
             timer = getattr(self, timer_name, None)
             if timer is not None:

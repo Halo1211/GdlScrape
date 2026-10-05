@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QMenu,
     QLineEdit,
     QPlainTextEdit,
     QProgressBar,
@@ -454,12 +455,12 @@ class DashboardUiMixin:
         # while preparing a download stay in the main workspace.
         action_bar = QHBoxLayout()
         action_bar.setSpacing(6)
-        self.btn_action_builder = self._btn("Composer", "Create downloads and reusable gallery-dl defaults in one place")
+        self.btn_action_builder = self._btn("Add downloads", "Build links, choose options for this download, then add jobs to the queue")
         self.btn_action_composer = self.btn_action_builder
         self.btn_action_config = self._btn("Config", "Build and save gallery-dl configuration")
         self.btn_action_preview = self._btn("Preview", "Preview final commands")
         self.btn_action_dedupe = self._btn("Dedupe", "Remove exact duplicate jobs")
-        self.btn_action_manage = self._btn("Manage", "Open library, scheduler, accounts, options, and runtime tools")
+        self.btn_action_manage = self._btn("Manage", "Open application status, folders, backups, library, schedules and accounts")
         self.btn_action_help = self._btn("Help", "Open the help center")
         self.btn_action_builder.clicked.connect(self.open_download_composer)
         self.btn_action_config.clicked.connect(self.open_config_builder)
@@ -467,11 +468,27 @@ class DashboardUiMixin:
         self.btn_action_dedupe.clicked.connect(self.remove_exact_duplicates)
         self.btn_action_manage.clicked.connect(self.open_management_center)
         self.btn_action_help.clicked.connect(self.open_help_center)
+        self.btn_action_tools = self._btn("Queue tools", "Inspect or adjust the current queue")
+        self.btn_action_tools.setObjectName("queueToolsButton")
+        # Menus must inherit a point font; the app theme otherwise uses pixels.
+        self.btn_action_tools.setStyleSheet("font-size: 9pt;")
+        queue_menu = QMenu(self.btn_action_tools)
+        ind = self._ui_is_indonesian()
+        for en, id_text, callback in (
+            ("Preview queued commands", "Periksa command antrean", self.command_preview),
+            ("Remove exact duplicate jobs", "Hapus job yang persis sama", self.remove_exact_duplicates),
+            ("Edit queue options and filters…", "Edit opsi dan filter antrean…", self.open_queue_options),
+        ):
+            action = queue_menu.addAction(id_text if ind else en)
+            action.setData((en, id_text))
+            action.triggered.connect(callback)
+        self.btn_action_tools.setMenu(queue_menu)
+        self.btn_action_preview.hide()
+        self.btn_action_dedupe.hide()
         for button in (
             self.btn_action_builder,
             self.btn_action_config,
-            self.btn_action_preview,
-            self.btn_action_dedupe,
+            self.btn_action_tools,
             self.btn_action_manage,
             self.btn_action_help,
         ):
@@ -616,11 +633,11 @@ class DashboardUiMixin:
             self.btn_retry: "Jalankan kembali semua pekerjaan yang gagal." if ind else "Run all failed jobs again.",
             self.btn_cancel: "Batalkan baris antrean yang sedang dipilih." if ind else "Cancel the currently selected queue row.",
             self.btn_stop: "Hentikan seluruh proses unduhan." if ind else "Stop every running download.",
-            self.btn_action_builder: "Susun job, default config, dan preset situs di satu tempat." if ind else "Compose jobs, config defaults, and site presets in one place.",
+            self.btn_action_builder: "Susun tautan dan opsi untuk job ini, lalu tambahkan ke antrean." if ind else "Build links and options for these jobs, then add them to the queue.",
             self.btn_action_config: "Buat dan simpan config gallery-dl." if ind else "Build and save gallery-dl configuration.",
             self.btn_action_preview: "Periksa perintah final sebelum dijalankan." if ind else "Inspect final commands before running them.",
             self.btn_action_dedupe: "Hapus entri yang benar-benar sama dari antrean." if ind else "Remove exact duplicate entries from the queue.",
-            self.btn_action_manage: "Kelola library, jadwal, akun, opsi, dan runtime." if ind else "Manage the library, schedules, accounts, options, and runtime.",
+            self.btn_action_manage: "Status aplikasi, folder, backup, library, jadwal dan akun." if ind else "Application status, folders, backups, library, schedules and accounts.",
             self.btn_action_help: "Buka petunjuk penggunaan aplikasi." if ind else "Open the application usage guide.",
             self.search_queue: "Cari transfer berdasarkan isi tabel." if ind else "Search transfers using table contents.",
             self.combo_filter: "Tampilkan transfer dengan status tertentu." if ind else "Show transfers with a specific status.",
@@ -654,12 +671,15 @@ class DashboardUiMixin:
         for index, text in labels:
             self.tabs.setTabText(index, text)
         if hasattr(self, "btn_action_builder"):
-            self.btn_action_builder.setText("RANCANG" if ind else "COMPOSER")
+            self.btn_action_builder.setText("TAMBAH UNDUHAN" if ind else "ADD DOWNLOADS")
             self.btn_action_config.setText("CONFIG")
             self.btn_action_preview.setText("PRATINJAU" if ind else "PREVIEW")
             self.btn_action_dedupe.setText("DUPLIKAT" if ind else "DEDUPE")
             self.btn_action_manage.setText("KELOLA" if ind else "MANAGE")
             self.btn_action_help.setText("BANTUAN" if ind else "HELP")
+            self.btn_action_tools.setText("ALAT ANTREAN" if ind else "QUEUE TOOLS")
+            for action in self.btn_action_tools.menu().actions():
+                action.setText(action.data()[int(ind)])
             self.chk_compress.setText("Kompres" if ind else "Compress")
             self.chk_convert_webp.setText("PNG → WebP")
             self.lbl_theme.setText("TEMA" if ind else "THEME")

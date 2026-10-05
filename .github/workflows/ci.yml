@@ -29,4 +29,4 @@ jobs:
       - name: Test
         env:
           QT_QPA_PLATFORM: offscreen
-        run: python -m unittest discover -s tests -v
+        run: python -m pytest -q

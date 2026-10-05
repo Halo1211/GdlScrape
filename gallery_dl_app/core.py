@@ -9,12 +9,13 @@ import platform
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Iterator, Optional
 from urllib.parse import unquote_plus, urlparse
 
 from .models import DownloadJob
@@ -25,7 +26,7 @@ IS_MACOS = platform.system() == "Darwin"
 
 APP_NAME = "GdlScrape"
 
-APP_VERSION = "1.0.2"
+APP_VERSION = "1.0.3"
 
 APP_DIR = Path.home() / ".gallery_dl_gui_dashboard"
 
@@ -96,6 +97,84 @@ MANAGED_AUTH_KEYS = frozenset({
     "client-id",
     "client-secret",
 })
+
+def is_link_or_reparse(metadata: os.stat_result) -> bool:
+    """Recognize links and Windows junctions without following their targets."""
+    return stat.S_ISLNK(metadata.st_mode) or bool(
+        getattr(metadata, "st_file_attributes", 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    )
+
+
+def iter_tree_entries(root: str | Path) -> Iterator[tuple[Path, os.stat_result]]:
+    """Walk entries lazily without descending through links or junctions.
+
+    Yield link metadata so callers can skip links or reject a linked tree.
+    Read errors propagate rather than presenting an incomplete tree as complete.
+    """
+    pending = [Path(root)]
+    while pending:
+        directory = pending.pop()
+        with os.scandir(directory) as children:
+            for child in children:
+                metadata = child.stat(follow_symlinks=False)
+                path = directory / child.name
+                yield path, metadata
+                if stat.S_ISDIR(metadata.st_mode) and not is_link_or_reparse(metadata):
+                    pending.append(path)
+
+
+def process_is_running(pid: int) -> bool:
+    """Probe ownership conservatively without sending a signal on Windows."""
+    if not isinstance(pid, int) or not 0 < pid <= 0xFFFFFFFF:
+        return False
+    if pid == os.getpid():
+        return True
+    if IS_WINDOWS:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel.WaitForSingleObject.restype = wintypes.DWORD
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel.CloseHandle.restype = wintypes.BOOL
+        handle = kernel.OpenProcess(0x100000, False, pid)  # SYNCHRONIZE only
+        if not handle:
+            # Access denied or another uncertain probe must not authorize
+            # deleting credentials or recovering a potentially live run.
+            return ctypes.get_last_error() not in (87, 1168)
+        try:
+            # WAIT_OBJECT_0 means exited. A zero-time wait avoids mistaking an
+            # actual exit code of 259 (STILL_ACTIVE) for a running process.
+            return kernel.WaitForSingleObject(handle, 0) != 0
+        finally:
+            kernel.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def jobs_to_database_text(jobs: Iterable[DownloadJob]) -> str:
+    """Serialize jobs with sticky tags and per-job notes for text round trips."""
+    lines: list[str] = []
+    last_tag = ""
+    for job in jobs:
+        tag = re.sub(r"[\r\n]+", " ", job.tag).strip()
+        if tag != last_tag:
+            lines.append(f"# {tag}" if tag else "#")
+            last_tag = tag
+        if job.notes:
+            lines.append(f"#@notes {' '.join(job.notes.split())}")
+        lines.append(job.raw)
+    return "\n".join(lines)
+
 
 def is_sensitive_option_key(key: object) -> bool:
     """Recognize config keys that carry authentication material.
@@ -200,7 +279,7 @@ def human_size(num: int | float) -> str:
 
 def safe_expand_path(text: str | Path) -> Path:
     raw = str(text).strip() or "."
-    return Path(raw).expanduser()
+    return Path(os.path.expandvars(os.path.expanduser(raw)))
 
 def atomic_write_text(
     path: str | Path,
@@ -284,6 +363,11 @@ def append_extra_args_to_command(command: str, extra: str) -> str:
     extra_args = split_command(extra)
     if not extra_args:
         return command
+    tokens = split_command(command)
+    if "--" in tokens:
+        boundary = tokens.index("--")
+        tokens[boundary:boundary] = extra_args
+        return " ".join(quote_arg_for_preview(part) for part in tokens)
     return command.rstrip() + " " + " ".join(quote_arg_for_preview(part) for part in extra_args)
 
 def append_extra_args_to_database_text(text: str, extra: str) -> str:
@@ -373,7 +457,7 @@ def validate_cookies_txt(path: str) -> tuple[bool, str]:
     """Perform a bounded, lightweight Netscape cookies.txt format check."""
     if not str(path or "").strip():
         return False, "No cookies.txt file selected."
-    target = Path(path).expanduser()
+    target = safe_expand_path(path)
     if not target.exists() or not target.is_file():
         return False, "cookies.txt file does not exist."
     try:
@@ -441,10 +525,40 @@ def command_string_to_argv(command: str | None) -> list[str]:
     if not command:
         return []
     command = command.strip()
-    p = Path(_strip_wrapping_quotes(command))
+    p = safe_expand_path(_strip_wrapping_quotes(command))
     if p.exists() and p.is_file():
         return [str(p)]
-    return split_command(command)
+    argv = split_command(command)
+    if argv:
+        # Expand only the executable. URL and option values can legitimately
+        # contain percent-encoded text that must reach gallery-dl unchanged.
+        argv[0] = os.path.expandvars(os.path.expanduser(argv[0]))
+    return argv
+
+
+def _executable_file_available(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    if not IS_WINDOWS:
+        return os.access(path, os.X_OK)
+    if path.suffix.lower() in {".bat", ".cmd", ".com"}:
+        return True
+    if path.suffix.lower() != ".exe":
+        return False
+    # Windows treats arbitrary bytes named .exe as a file, but CreateProcess
+    # rejects them. Check the inexpensive PE header before marking the GUI ready.
+    try:
+        with path.open("rb") as stream:
+            header = stream.read(64)
+            if len(header) < 64 or header[:2] != b"MZ":
+                return False
+            pe_offset = int.from_bytes(header[60:64], "little")
+            if pe_offset < 64 or pe_offset > 16 * 1024 * 1024:
+                return False
+            stream.seek(pe_offset)
+            return stream.read(4) == b"PE\0\0"
+    except OSError:
+        return False
 
 def command_executable_available(command: str | None) -> bool:
     """Return whether the first argv item resolves to an executable file.
@@ -462,10 +576,9 @@ def command_executable_available(command: str | None) -> bool:
     candidate = Path(executable).expanduser()
     looks_like_path = candidate.is_absolute() or "/" in executable or "\\" in executable
     if looks_like_path:
-        return candidate.is_file() and (
-            IS_WINDOWS or os.access(candidate, os.X_OK)
-        )
-    return shutil.which(executable) is not None
+        return _executable_file_available(candidate)
+    resolved = shutil.which(executable)
+    return resolved is not None and _executable_file_available(Path(resolved))
 
 def find_gallery_dl() -> str | None:
     if getattr(sys, "frozen", False):
@@ -581,9 +694,76 @@ def parse_url_meta(url: str) -> tuple[str, str]:
         ident = m.group(1)
     return service, ident
 
+GALLERY_DL_SHORT_ZERO_VALUE_CHARS = "46EGJKSUghjqsvw"
+
+
+def validate_finite_numbers(value: object) -> object:
+    """Reject nonfinite numeric literals, including inside nested containers."""
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("Numeric values must be finite")
+    if isinstance(value, complex) and not (math.isfinite(value.real) and math.isfinite(value.imag)):
+        raise ValueError("Numeric values must be finite")
+    if isinstance(value, dict):
+        for key, item in value.items():
+            validate_finite_numbers(key)
+            validate_finite_numbers(item)
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        for item in value:
+            validate_finite_numbers(item)
+    return value
+
+
+def expand_gallery_dl_short_options(tokens: list[str]) -> list[str]:
+    """Expand argparse short clusters while preserving option values and --."""
+    result: list[str] = []
+    remaining = 0
+    for index, token in enumerate(tokens):
+        if remaining:
+            result.append(token)
+            remaining -= 1
+            continue
+        if token == "--":
+            result.extend(tokens[index:])
+            break
+        pieces = [token]
+        if token.startswith("-") and not token.startswith("--") and len(token) > 2:
+            candidate: list[str] = []
+            for offset, char in enumerate(token[1:], 1):
+                flag = "-" + char
+                if char in GALLERY_DL_SHORT_ZERO_VALUE_CHARS:
+                    candidate.append(flag)
+                elif flag in GALLERY_DL_OPTION_VALUE_COUNTS:
+                    candidate.append("-" + token[offset:])
+                    break
+                else:
+                    candidate = []
+                    break
+            if candidate:
+                pieces = candidate
+        result.extend(pieces)
+        last = pieces[-1]
+        flag, separator, _value = last.partition("=")
+        if flag in GALLERY_DL_VARIADIC_VALUE_FLAGS and not separator:
+            result.extend(tokens[index + 1:])
+            break
+        if not separator:
+            remaining = GALLERY_DL_OPTION_VALUE_COUNTS.get(flag, 0)
+            if not remaining and last.startswith("-") and not last.startswith("--") and len(last) > 2:
+                remaining = max(0, GALLERY_DL_OPTION_VALUE_COUNTS.get(last[:2], 0) - 1)
+    return result
+
+
+def insert_gallery_dl_arguments(base: list[str], arguments: list[str]) -> list[str]:
+    """Place generated arguments before gallery-dl's positional boundary."""
+    if is_gallery_dl_invocation(base) and "--" in base:
+        boundary = base.index("--")
+        return base[:boundary] + list(arguments) + base[boundary:]
+    return list(base) + list(arguments)
+
+
 def normalize_destination_argv(tokens: list[str]) -> list[str]:
     """Normalize unusable trailing spaces/dots in Windows destination values."""
-    normalized = list(tokens)
+    normalized = expand_gallery_dl_short_options(tokens)
     if not IS_WINDOWS:
         return normalized
 
@@ -635,6 +815,8 @@ def normalize_destination_argv(tokens: list[str]) -> list[str]:
 
 def extract_destination(tokens: list[str]) -> str:
     tokens = normalize_destination_argv(tokens)
+    destination = "-"
+    exact_directory: str | None = None
     i = 0
     while i < len(tokens):
         token = tokens[i]
@@ -644,13 +826,27 @@ def extract_destination(tokens: list[str]) -> str:
         # still an explicit per-job output path, so callers must not append a
         # second GUI default ``-d`` or disable safe post-processing for it.
         if token in ("-d", "--destination", "-D", "--directory") and i + 1 < len(tokens):
-            return tokens[i + 1]
-        if token.startswith(("--destination=", "--directory=")):
-            return token.split("=", 1)[1]
-        if token.startswith(("-d=", "-D=")):
-            return token.split("=", 1)[1]
+            if token in ("-D", "--directory"):
+                exact_directory = tokens[i + 1]
+            else:
+                destination = tokens[i + 1]
+            i += 2
+            continue
+        if token.startswith(("--destination=", "--directory=", "-d=", "-D=")):
+            value = token.split("=", 1)[1]
+            if token.startswith(("--directory=", "-D=")):
+                exact_directory = value
+            else:
+                destination = value
+            i += 1
+            continue
         if token.startswith(("-d", "-D")) and len(token) > 2 and not token.startswith("--"):
-            return token[2:]
+            if token.startswith("-D"):
+                exact_directory = token[2:]
+            else:
+                destination = token[2:]
+            i += 1
+            continue
         if token.startswith("-") and token != "-":
             flag, has_equals, _attached = token.partition("=")
             if flag in GALLERY_DL_VARIADIC_VALUE_FLAGS and not has_equals:
@@ -665,7 +861,9 @@ def extract_destination(tokens: list[str]) -> str:
                 )
                 i += value_count - 1 if attached_short else value_count
         i += 1
-    return "-"
+    # gallery-dl applies repeated base-directory values in order, while its
+    # exact -D directory takes priority over the base directory in either order.
+    return exact_directory if exact_directory is not None else destination
 
 def normalized_job_argv(job: DownloadJob) -> tuple[str, ...]:
     """Return a stable, execution-oriented identity for duplicate detection.
@@ -854,6 +1052,18 @@ def redact_sensitive_argv(argv: list[str]) -> list[str]:
         token = out[i]
         low = token.lower()
 
+        compact = re.fullmatch(rf"(-[{GALLERY_DL_SHORT_ZERO_VALUE_CHARS}]*)([puCo])(.*)", token)
+        if compact:
+            prefix, flag, attached = compact.groups()
+            if attached:
+                out[i] = prefix + flag + (_redact_key_value(attached) if flag == "o" else REDACTED)
+                i += 1
+            else:
+                if i + 1 < len(out):
+                    out[i + 1] = _redact_key_value(out[i + 1]) if flag == "o" else REDACTED
+                i += 2
+            continue
+
         # --option=password=value (single-token form).  The former redactor
         # handled only ``--option password=value`` and leaked this equivalent
         # syntax in previews and audit output.
@@ -927,6 +1137,55 @@ def redact_sensitive_text(text: str) -> str:
     # could not understand quoted values containing spaces.
     value = _redact_url_credentials(str(text))
 
+    # Handle complete quoted config-option values before generic assignment
+    # redaction, which cannot infer that spaces still belong to the secret.
+    option_flags = rf"(?:(?i:--option)|-[{GALLERY_DL_SHORT_ZERO_VALUE_CHARS}]*o)"
+    option_key = r"[A-Za-z][A-Za-z0-9_.-]*"
+
+    def redact_quoted_option(match: re.Match[str]) -> str:
+        if not is_sensitive_option_key(match.group("key")):
+            return match.group(0)
+        return f"{match.group('prefix')}{match.group('quote')}{match.group('key')}={REDACTED}{match.group('quote')}"
+
+    value = re.sub(
+        rf"(?P<prefix>(?:[\"']{option_flags}[\"']\s*,\s*|(?<!\S){option_flags}(?:=|\s+)?))"
+        rf"(?P<quote>[\"'])(?P<key>{option_key})="
+        rf"(?:\\.|(?!(?P=quote))[^\\\r\n])*(?P=quote)",
+        redact_quoted_option,
+        value,
+    )
+
+    def redact_attached_quoted_option(match: re.Match[str]) -> str:
+        if not is_sensitive_option_key(match.group("key")):
+            return match.group(0)
+        return f"{match.group('prefix')}{match.group('key')}={REDACTED}{match.group('quote')}"
+
+    value = re.sub(
+        rf"(?P<prefix>(?P<quote>[\"']){option_flags})(?P<key>{option_key})="
+        rf"(?:\\.|(?!(?P=quote))[^\\\r\n])*(?P=quote)",
+        redact_attached_quoted_option,
+        value,
+    )
+
+    def redact_option_quoted_assignment(match: re.Match[str]) -> str:
+        if not is_sensitive_option_key(match.group("key")):
+            return match.group(0)
+        return f"{match.group('prefix')}{match.group('key')}={match.group('quote')}{REDACTED}{match.group('quote')}"
+
+    value = re.sub(
+        rf"(?P<prefix>(?<!\S){option_flags}(?:=|\s+)?)(?P<key>{option_key})="
+        rf"(?P<quote>[\"'])(?:\\.|(?!(?P=quote))[^\\\r\n])*(?P=quote)",
+        redact_option_quoted_assignment,
+        value,
+    )
+    value = re.sub(
+        rf"(?P<prefix>(?<!\S){option_flags}(?:=|\s+)?)"
+        rf"(?P<quote>[\"'])(?P<key>{option_key})="
+        rf"(?:\\.|(?!(?P=quote))[^\\\r\n])*$",
+        redact_quoted_option,
+        value,
+    )
+
     # gallery-dl, Python exceptions, and diagnostic helpers can render config
     # data as dict/JSON or plain assignments rather than argv.  Redact these
     # structured forms before the command-line patterns below.  Query-string
@@ -970,7 +1229,7 @@ def redact_sensitive_text(text: str) -> str:
     )
     value = re.sub(
         r"(?<![?&#A-Za-z0-9_.-])(?P<key>[A-Za-z][A-Za-z0-9_.-]*)"
-        r"(?P<separator>\s*=\s*)(?P<value>[^\s,;}\]&]+)",
+        r"(?P<separator>\s*=\s*)(?P<value>[^\s,;}\]&\"']+)",
         redact_assignment,
         value,
     )
@@ -983,6 +1242,7 @@ def redact_sensitive_text(text: str) -> str:
     # redact_sensitive_argv handles structured argv tokens. These patterns add
     # defense for options and headers embedded in a longer subprocess line.
     long_flags = "|".join(re.escape(flag) for flag in SECRET_VALUE_FLAGS if flag.startswith("--"))
+    short_flags = rf"-[{GALLERY_DL_SHORT_ZERO_VALUE_CHARS}]*[puC]"
     option_key = r"[A-Za-z][A-Za-z0-9_.-]*"
     quoted_value = r'(?:"(?:\\.|[^"\r\n])*"|\'(?:\\.|[^\'\r\n])*\')'
 
@@ -990,7 +1250,7 @@ def redact_sensitive_text(text: str) -> str:
     # than as a command line. Handle its quote/comma boundaries explicitly;
     # the normal whitespace-delimited patterns below cannot see through them.
     value = re.sub(
-        rf"(?i)(?P<flag_quote>[\"'])(?P<flag>{long_flags})(?P=flag_quote)"
+        rf"(?P<flag_quote>[\"'])(?P<flag>(?i:{long_flags})|{short_flags})(?P=flag_quote)"
         rf"(?P<separator>\s*,\s*)(?P<value_quote>[\"'])"
         rf"[^\"'\r\n]*(?P=value_quote)",
         lambda match: (
@@ -1010,7 +1270,7 @@ def redact_sensitive_text(text: str) -> str:
         value,
     )
     value = re.sub(
-        r"(?P<quote>[\"'])(?P<flag>-[puC])(?:=)?[^\"'\r\n]+(?P=quote)",
+        rf"(?P<quote>[\"'])(?P<flag>{short_flags})(?:=)?[^\"'\r\n]+(?P=quote)",
         lambda match: (
             f"{match.group('quote')}{match.group('flag')}{REDACTED}"
             f"{match.group('quote')}"
@@ -1028,23 +1288,23 @@ def redact_sensitive_text(text: str) -> str:
         value,
     )
     value = re.sub(
-        rf"(?<!\S)(-[puC])(?:=|\s+)?({quoted_value})",
+        rf"(?<!\S)({short_flags})(?:=|\s+)?({quoted_value})",
         lambda match: f"{match.group(1)}{REDACTED}",
         value,
     )
 
     def redact_option_pair(match: re.Match[str]) -> str:
-        if not is_sensitive_option_key(match.group(2)):
+        if not is_sensitive_option_key(match.group("key")):
             return match.group(0)
         return (
             f"{match.group(1)}{match.group('option_separator')}"
-            f"{match.group(2)}={REDACTED}"
+            f"{match.group('key')}={REDACTED}"
         )
 
     # Cover both --option password="..." and --option "password=...".
     value = re.sub(
-        rf"(?i)(?<!\S)(-o|--option)(?P<option_separator>=|\s+)"
-        rf"({option_key})=({quoted_value})",
+        rf"(?<!\S)({option_flags})(?P<option_separator>=|\s+|(?=[A-Za-z]))"
+        rf"(?P<key>{option_key})=({quoted_value})",
         redact_option_pair,
         value,
     )
@@ -1059,7 +1319,7 @@ def redact_sensitive_text(text: str) -> str:
         )
 
     value = re.sub(
-        rf"(?i)(?<!\S)(-o|--option)(?P<wrapped_separator>=|\s+)"
+        rf"(?<!\S)({option_flags})(?P<wrapped_separator>=|\s+)"
         rf"(?P<quote>[\"'])(?P<key>{option_key})="
         rf"[^\r\n]*?(?P=quote)",
         redact_wrapped_option_pair,
@@ -1075,13 +1335,13 @@ def redact_sensitive_text(text: str) -> str:
             value,
         )
         value = re.sub(
-            rf"(?<!\S)(-[puC])(?:=|\s+)?{unclosed_quote}",
+            rf"(?<!\S)({short_flags})(?:=|\s+)?{unclosed_quote}",
             lambda match: f"{match.group(1)}{REDACTED}",
             value,
         )
         value = re.sub(
-            rf"(?i)(?<!\S)(-o|--option)(?P<option_separator>=|\s+)"
-            rf"({option_key})={unclosed_quote}",
+            rf"(?<!\S)({option_flags})(?P<option_separator>=|\s+|(?=[A-Za-z]))"
+            rf"(?P<key>{option_key})={unclosed_quote}",
             redact_option_pair,
             value,
         )
@@ -1091,13 +1351,13 @@ def redact_sensitive_text(text: str) -> str:
         value,
     )
     value = re.sub(
-        r"(?<!\S)(-[puC])(?:=|\s+)?[^\s]+",
+        rf"(?<!\S)({short_flags})(?:=|\s+)?[^\s]+",
         lambda match: f"{match.group(1)}{REDACTED}",
         value,
     )
     value = re.sub(
-        rf"(?i)(?<!\S)(-o|--option)(?P<option_separator>=|\s+)"
-        rf"({option_key})=[^\s]+",
+        rf"(?<!\S)({option_flags})(?P<option_separator>=|\s+|(?=[A-Za-z]))"
+        rf"(?P<key>{option_key})=[^\s]+",
         redact_option_pair,
         value,
     )
@@ -1290,7 +1550,7 @@ def csv_rows_first_column_fallback(text: str, dialect: csv.Dialect, skip_header:
         if not values:
             continue
         # Flatten embedded newlines from quoted cells: one entry, one line.
-        first = " ".join(str(values[0] or "").split())
+        first = _row_value({"command": values[0]}, "command")
         if not first or first.startswith("#"):
             if first.startswith("#"):
                 out.append(first)
@@ -1325,6 +1585,7 @@ def classify_error(text: str) -> str:
     return "unknown"
 
 def ensure_no_option(args: list[str], names: tuple[str, ...]) -> bool:
+    args = expand_gallery_dl_short_options(args)
     i = 0
     while i < len(args):
         arg = args[i]
@@ -1379,9 +1640,9 @@ def normalize_process_return_code(value: object, default: int = -1) -> int:
     return max(-0x80000000, min(code, 0x7FFFFFFF))
 
 def safe_filename(name: str) -> str:
-    name = re.sub(r'[<>:"/\\|?*]+', '_', str(name).strip())
+    name = re.sub(r'[\x00-\x1f<>:"/\\|?*]+', '_', str(name).strip())
     name = re.sub(r'\s+', ' ', name).strip(' .')
-    name = name[:120] or 'untagged'
+    name = name[:120].rstrip(' .') or 'untagged'
     # Windows reserves these device names even when an extension is present
     # ("CON", "con.txt", "LPT1", ...).  Tags are used as folder names by
     # Output by Tag, so leaving them unchanged makes otherwise valid jobs fail.
@@ -1501,6 +1762,7 @@ GALLERY_DL_OPTION_VALUE_COUNTS: dict[str, int] = {
 
 
 def _extract_url_from_tokens(tokens: list[str], fallback: str) -> str:
+    tokens = expand_gallery_dl_short_options(tokens)
     values_remaining = 0
     variadic_values = False
     positional_only = False
@@ -1554,7 +1816,7 @@ def _gallery_dl_command_has_source(tokens: list[str]) -> bool:
     value_option = ""
     positional_only = False
     has_source = False
-    for token in strip_gallery_dl_invocation(tokens):
+    for token in expand_gallery_dl_short_options(strip_gallery_dl_invocation(tokens)):
         if values_remaining:
             if value_option in input_file_flags and token:
                 has_source = True

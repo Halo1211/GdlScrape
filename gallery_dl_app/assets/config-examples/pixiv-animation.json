@@ -1,0 +1,19 @@
+{
+    "extractor": {
+        "base-directory": "./downloads",
+        "pixiv": {
+            "include": ["artworks"],
+            "ugoira": "original",
+            "postprocessors": ["animation-mp4"]
+        }
+    },
+    "postprocessor": {
+        "animation-mp4": {
+            "name": "ugoira",
+            "mode": "concat",
+            "extension": "mp4",
+            "ffmpeg-args": ["-c:v", "libx264", "-b:v", "5M", "-pix_fmt", "yuv420p", "-an"],
+            "keep-files": true
+        }
+    }
+}

@@ -47,22 +47,126 @@ from gallery_dl_app.ui_shell import UiShellMixin
 
 
 class ArchitectureTests(unittest.TestCase):
+    def test_command_preview_uses_account_config_without_removing_run_config(self):
+        with (
+            patch.object(ReportsMixin, "_load_autosave_silently", lambda _self: None),
+            patch.object(SystemToolsMixin, "autosave_session", lambda _self: None),
+            patch.object(ManagementMixin, "_start_management_services", lambda _self: None),
+            tempfile.TemporaryDirectory() as folder,
+        ):
+            root = Path(folder)
+            runtime = root / "runtime"
+            app, window = package.create_application([])
+            try:
+                window.feature_store = FeatureStore(root / "features.sqlite3")
+                window.active_account_profile_id = window.feature_store.save_account({
+                    "name": "Preview profile", "site": "example", "auth_kind": "browser",
+                    "cookie_source": "firefox",
+                })
+                window.combo_cookies.setCurrentText("chrome")
+                window.config_path = None
+                existing = root / "existing-run-config.json"
+                existing.write_text("{}")
+                window._run_config_path = str(existing)
+                window.txt_commands.setPlainText("https://example.com/a")
+
+                def inspect_preview(_title, message, _level):
+                    configs = list(runtime.glob("secure-config-*.json"))
+                    self.assertEqual(len(configs), 1)
+                    config = json.loads(configs[0].read_text(encoding="utf-8"))
+                    self.assertEqual(config["extractor"]["example"]["cookies"], ["firefox"])
+                    self.assertIn("--config", message)
+                    self.assertNotIn("--cookies-from-browser chrome", message)
+
+                with (
+                    patch("gallery_dl_app.management.SECURE_RUNTIME_DIR", runtime),
+                    patch.object(window, "show_scroll_message", side_effect=inspect_preview),
+                ):
+                    window.command_preview()
+                self.assertEqual(list(runtime.glob("secure-config-*.json")), [])
+                self.assertTrue(existing.exists())
+                self.assertEqual(window._run_config_path, str(existing))
+            finally:
+                window._run_config_path = None
+                window.close()
+                app.processEvents()
+
+    def test_queue_review_preserves_real_ui_results_selection_and_disabled_jobs(self):
+        from gallery_dl_app.models import JobResult
+
+        with (
+            patch.object(ReportsMixin, "_load_autosave_silently", lambda _self: None),
+            patch.object(SystemToolsMixin, "autosave_session", lambda _self: None),
+            patch.object(ManagementMixin, "_start_management_services", lambda _self: None),
+        ):
+            app, window = package.create_application([])
+            try:
+                window.txt_commands.setPlainText("https://example.com/a\nhttps://example.com/b")
+                self.assertTrue(window._rebuild_from_text())
+                window.results[0] = JobResult(0, "done", downloaded=3)
+                window.done_indices.add(0)
+                window.jobs[1].enabled = False
+                window.populate_queue_table()
+                window.tbl_queue.selectRow(1)
+                self.assertTrue(window._rebuild_from_text())
+                self.assertEqual(window.results[0].downloaded, 3)
+                self.assertIn(0, window.done_indices)
+                self.assertFalse(window.jobs[1].enabled)
+                self.assertEqual(window.selected_indices(), [1])
+                window.txt_commands.setPlainText("https://example.com/new")
+                self.assertTrue(window._rebuild_from_text())
+                self.assertEqual(window.results, {})
+                self.assertEqual(window.done_indices, set())
+            finally:
+                window.close()
+                app.processEvents()
+
+    def test_pending_editor_insert_does_not_delete_a_different_selected_job(self):
+        with (
+            patch.object(ReportsMixin, "_load_autosave_silently", lambda _self: None),
+            patch.object(SystemToolsMixin, "autosave_session", lambda _self: None),
+            patch.object(ManagementMixin, "_start_management_services", lambda _self: None),
+        ):
+            app, window = package.create_application([])
+            try:
+                window.txt_commands.setPlainText("https://example.com/a\nhttps://example.com/b")
+                window._rebuild_from_text()
+                window.tbl_queue.selectRow(1)
+                window.txt_commands.setPlainText(
+                    "https://example.com/new\nhttps://example.com/a\nhttps://example.com/b"
+                )
+                self.assertTrue(window._text_debounce.isActive())
+                window.delete_selected()
+                self.assertEqual([job.url for job in window.jobs], [
+                    "https://example.com/new", "https://example.com/a",
+                ])
+                self.assertEqual(
+                    [job.url for job in package.parse_text_database(window.txt_commands.toPlainText())],
+                    [job.url for job in window.jobs],
+                )
+            finally:
+                window.close()
+                app.processEvents()
+
     def test_release_metadata_matches_public_version(self):
         metadata = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
         self.assertEqual(metadata["project"]["name"], "gdlscrape")
         self.assertEqual(metadata["project"]["version"], package.__version__)
         windows_version = Path("packaging/version_info.txt").read_text(encoding="utf-8")
-        self.assertIn("StringStruct('FileVersion', '1.0.2')", windows_version)
-        self.assertIn("StringStruct('ProductVersion', '1.0.2')", windows_version)
+        self.assertIn(f"StringStruct('FileVersion', '{package.__version__}')", windows_version)
+        self.assertIn(f"StringStruct('ProductVersion', '{package.__version__}')", windows_version)
+        version_tuple = tuple(map(int, package.__version__.split("."))) + (0,)
+        self.assertIn(f"filevers={version_tuple}", windows_version)
+        self.assertIn(f"prodvers={version_tuple}", windows_version)
 
     def test_packaging_requires_gallery_dl_with_pawchive_support(self):
         metadata = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
         requirements = Path("requirements.txt").read_text(encoding="utf-8")
         readme = Path("README.md").read_text(encoding="utf-8")
 
-        self.assertIn("gallery-dl>=1.32.10", metadata["project"]["dependencies"])
-        self.assertIn("gallery-dl>=1.32.10", requirements.splitlines())
-        self.assertIn("gallery-dl`](https://gdl-org.github.io/docs/) 1.32.10 or newer", readme)
+        self.assertIn("gallery-dl>=1.32.14", metadata["project"]["dependencies"])
+        self.assertIn("gallery-dl>=1.32.14", requirements.splitlines())
+        self.assertIn("gallery-dl`](https://gdl-org.github.io/docs/) 1.32.14 or newer", readme)
 
     def test_standalone_build_bundles_dynamic_gallery_dl_extractors(self):
         spec = Path("packaging/GdlScrape.spec").read_text(encoding="utf-8")
@@ -111,9 +215,8 @@ class ArchitectureTests(unittest.TestCase):
         try:
             window.show()
             app.processEvents()
-            self.assertEqual(window.windowTitle(), "GdlScrape v1.0.2")
-            self.assertEqual(package.__version__, "1.0.2")
-            self.assertEqual(window.lbl_app_version.text(), "v1.0.2  •  DESKTOP")
+            self.assertEqual(window.windowTitle(), f"GdlScrape v{package.__version__}")
+            self.assertEqual(window.lbl_app_version.text(), f"v{package.__version__}  •  DESKTOP")
             self.assertGreater(window._stable_table_font().pointSizeF(), 0)
             self.assertEqual(window.lbl_title.text(), "GDL")
             self.assertEqual(window.lbl_subtitle.text(), "SCRAPE")
@@ -172,7 +275,7 @@ class ArchitectureTests(unittest.TestCase):
                     window.btn_action_dedupe.text(),
                     window.btn_action_help.text(),
                 ],
-                ["COMPOSER", "PREVIEW", "DEDUPE", "HELP"],
+                ["ADD DOWNLOADS", "PREVIEW", "DEDUPE", "HELP"],
             )
             self.assertIs(window.btn_action_builder, window.btn_action_composer)
             self.assertEqual(window.btn_action_config.text(), "CONFIG")
@@ -322,13 +425,360 @@ class ArchitectureTests(unittest.TestCase):
             self.assertEqual(len(dialogs), 1)
             dialog = dialogs[0]
             self.assertEqual(dialog.windowTitle(), "Config Builder")
+            tabs = dialog.findChild(QTabWidget, "composerTabs")
+            self.assertEqual(tabs.tabText(tabs.currentIndex()), "Start here")
             buttons = {button.text(): button for button in dialog.findChildren(QPushButton)}
             self.assertTrue(buttons["Add to Queue"].isHidden())
-            self.assertFalse(buttons["Save Defaults"].isHidden())
+            self.assertFalse(buttons["Save config file"].isHidden())
             self.assertFalse(buttons["Save As..."].isHidden())
+            self.assertIsNotNone(dialog.findChild(QPushButton, "configWebsiteSettingsButton"))
+            self.assertTrue(any(chart.config_mode for chart in dialog.findChildren(ComposerFlowchart)))
+            starter = dialog.findChild(QCheckBox, "configStarterHistory")
+            starter.setChecked(True)
+            summary = dialog.findChild(QPlainTextEdit, "configReviewSummary").toPlainText()
+            self.assertIn("Download history file", summary)
+            self.assertIn("sqlite3", summary)
         finally:
             window.close()
             app.processEvents()
+
+    def test_website_settings_creates_config_at_displayed_default_location(self):
+        with (
+            patch.object(ReportsMixin, "_load_autosave_silently", lambda _self: None),
+            patch.object(SystemToolsMixin, "autosave_session", lambda _self: None),
+            patch.object(ManagementMixin, "_start_management_services", lambda _self: None),
+            tempfile.TemporaryDirectory() as folder,
+        ):
+            config_folder = Path(folder) / "new-folder"
+            target = config_folder / "config.json"
+            app, window = package.create_application([])
+            window.config_path = None
+
+            def inspect_dialog(dialog):
+                if dialog.objectName() != "siteConfigStudio":
+                    dialog.findChild(QPushButton, "configWebsiteSettingsButton").click()
+                    return QDialog.Rejected
+                self.assertIn(str(target), dialog.findChild(QLabel, "siteConfigFilePath").text())
+                picker = dialog.findChild(QComboBox, "siteOptionsSiteCombo")
+                picker.setCurrentIndex(picker.findText("twitter"))
+                dialog.findChild(QLineEdit, "siteOptionValue_timeout").setText("60")
+                dialog.findChild(QPushButton, "siteConfigSave").click()
+                self.assertEqual(dialog.result(), QDialog.Accepted)
+                return QDialog.Accepted
+
+            try:
+                with (
+                    patch.object(QDialog, "exec", inspect_dialog),
+                    patch("gallery_dl_app.composer.APP_DIR", config_folder),
+                    patch("gallery_dl_app.composer.detect_config_path", return_value=None),
+                    patch.object(window, "show_compact_message"),
+                    patch.object(window, "_refresh_env"),
+                ):
+                    window.open_config_builder()
+                self.assertEqual(window.config_path, str(target))
+                saved = json.loads(target.read_text(encoding="utf-8"))
+                self.assertEqual(saved["extractor"]["twitter"]["timeout"], 60.0)
+            finally:
+                window.config_path = None
+                window.close()
+                app.processEvents()
+
+    def test_website_settings_saves_all_sites_and_stays_open_on_failure(self):
+        with (
+            patch.object(ReportsMixin, "_load_autosave_silently", lambda _self: None),
+            patch.object(SystemToolsMixin, "autosave_session", lambda _self: None),
+            patch.object(ManagementMixin, "_start_management_services", lambda _self: None),
+            tempfile.TemporaryDirectory() as folder,
+        ):
+            target = Path(folder) / "config.json"
+            original = {"extractor": {"twitter": {"custom-setting": "keep"}}, "custom-root": 42}
+            target.write_text(json.dumps(original), encoding="utf-8")
+            app, window = package.create_application([])
+            window.config_path = str(target)
+
+            def inspect_dialog(dialog):
+                if dialog.objectName() != "siteConfigStudio":
+                    dialog.findChild(QPushButton, "configWebsiteSettingsButton").click()
+                    return QDialog.Rejected
+                self.assertIn(str(target), dialog.findChild(QLabel, "siteConfigFilePath").text())
+                picker = dialog.findChild(QComboBox, "siteOptionsSiteCombo")
+                picker.setCurrentIndex(picker.findText("twitter"))
+                dialog.findChild(QLineEdit, "siteOptionValue_timeout").setText("invalid")
+                dialog.findChild(QPushButton, "siteConfigSave").click()
+                self.assertEqual(dialog.result(), QDialog.Rejected)
+                self.assertEqual(json.loads(target.read_text(encoding="utf-8")), original)
+                dialog.findChild(QLineEdit, "siteOptionValue_timeout").setText("60")
+                picker.setCurrentIndex(picker.findText("imagefap"))
+                dialog.findChild(QLineEdit, "siteOptionValue_timeout").setText("45")
+                with patch.object(QMessageBox, "question", return_value=QMessageBox.No):
+                    dialog.findChild(QPushButton, "siteConfigSave").click()
+                self.assertEqual(dialog.result(), QDialog.Rejected)
+                self.assertEqual(json.loads(target.read_text(encoding="utf-8")), original)
+                with patch.object(QMessageBox, "question", return_value=QMessageBox.Yes):
+                    dialog.findChild(QPushButton, "siteConfigSave").click()
+                self.assertEqual(dialog.result(), QDialog.Accepted)
+                return QDialog.Accepted
+
+            try:
+                with (
+                    patch.object(QDialog, "exec", inspect_dialog),
+                    patch.object(window, "show_compact_message"),
+                    patch.object(window, "_refresh_env"),
+                ):
+                    window.open_config_builder()
+                saved = json.loads(target.read_text(encoding="utf-8"))
+                self.assertEqual(saved["extractor"]["twitter"]["timeout"], 60.0)
+                self.assertEqual(saved["extractor"]["imagefap"]["timeout"], 45.0)
+                self.assertEqual(saved["extractor"]["twitter"]["custom-setting"], "keep")
+                self.assertEqual(saved["custom-root"], 42)
+                backups = list(target.parent.glob("config.json.bak_*"))
+                self.assertEqual(len(backups), 1)
+                self.assertEqual(json.loads(backups[0].read_text(encoding="utf-8")), original)
+            finally:
+                window.config_path = None
+                window.close()
+                app.processEvents()
+
+    def test_full_catalog_saves_postprocessors_family_settings_and_page_overrides(self):
+        with (
+            patch.object(ReportsMixin, "_load_autosave_silently", lambda _self: None),
+            patch.object(SystemToolsMixin, "autosave_session", lambda _self: None),
+            patch.object(ManagementMixin, "_start_management_services", lambda _self: None),
+            tempfile.TemporaryDirectory() as folder,
+        ):
+            target = Path(folder) / "config.json"
+            target.write_text(json.dumps({"extractor": {"postprocessors": [{"name": "metadata", "filename": "keep.json"}]}}), encoding="utf-8")
+            app, window = package.create_application([])
+            window.config_path = str(target)
+
+            def inspect_dialog(dialog):
+                if dialog.objectName() != "siteConfigStudio":
+                    dialog.findChild(QPushButton, "configWebsiteSettingsButton").click()
+                    return QDialog.Rejected
+                search = dialog.findChild(QLineEdit, "configReferenceSearch")
+                value = dialog.findChild(QLineEdit, "configReferenceValue")
+                kind = dialog.findChild(QComboBox, "configReferenceType")
+                site = dialog.findChild(QComboBox, "configReferenceSite")
+                apply = dialog.findChild(QPushButton, "setReferenceOption")
+                search.setText("postprocessor.zip.compression")
+                choice = dialog.findChild(QComboBox, "configReferenceChoice")
+                choice.setCurrentIndex(choice.findData("zip"))
+                apply.click()
+                search.setText("extractor.[Danbooru].threshold")
+                site.setCurrentIndex(site.findText("e621"))
+                kind.setCurrentIndex(kind.findData("integer"))
+                value.setText("75")
+                apply.click()
+                search.setText("extractor.*.timeout")
+                site.setCurrentIndex(site.findText("twitter"))
+                dialog.findChild(QLineEdit, "configReferenceSubcategory").setText("user")
+                kind.setCurrentIndex(kind.findData("number"))
+                value.setText("60")
+                apply.click()
+                summary = dialog.findChild(QPlainTextEdit, "siteConfigChangeSummary").toPlainText()
+                self.assertIn("e621", summary)
+                self.assertIn("twitter.user", summary)
+                self.assertIn("zip", summary)
+                search.setText("output.progress")
+                choice.setCurrentIndex(choice.findText("Disabled"))
+                dialog.findChild(QPushButton, "siteConfigSave").click()
+                self.assertEqual(dialog.result(), QDialog.Accepted)
+                return QDialog.Accepted
+
+            try:
+                with (
+                    patch.object(QDialog, "exec", inspect_dialog),
+                    patch.object(QMessageBox, "question", return_value=QMessageBox.Yes),
+                    patch.object(window, "show_compact_message"),
+                    patch.object(window, "_refresh_env"),
+                ):
+                    window.open_config_builder()
+                saved = json.loads(target.read_text(encoding="utf-8"))
+                self.assertEqual(saved["extractor"]["postprocessors"][0]["filename"], "keep.json")
+                self.assertEqual(saved["extractor"]["postprocessors"][1], {"name": "zip", "compression": "zip"})
+                self.assertEqual(saved["extractor"]["e621"]["threshold"], 75)
+                self.assertEqual(saved["extractor"]["twitter"]["user"]["timeout"], 60.0)
+                self.assertIs(saved["output"]["progress"], False)
+            finally:
+                window.config_path = None
+                window.close()
+                app.processEvents()
+
+    def test_instagram_forms_and_catalog_drafts_survive_navigation_and_save(self):
+        from gallery_dl_app.config_value_editor import StructuredConfigEditor
+
+        with (
+            patch.object(ReportsMixin, "_load_autosave_silently", lambda _self: None),
+            patch.object(SystemToolsMixin, "autosave_session", lambda _self: None),
+            patch.object(ManagementMixin, "_start_management_services", lambda _self: None),
+            tempfile.TemporaryDirectory() as folder,
+        ):
+            target = Path(folder) / "config.json"
+            target.write_text("{}", encoding="utf-8")
+            app, window = package.create_application([])
+            window.config_path = str(target)
+
+            def inspect_dialog(dialog):
+                if dialog.objectName() != "siteConfigStudio":
+                    dialog.findChild(QPushButton, "configWebsiteSettingsButton").click()
+                    return QDialog.Rejected
+                site = dialog.findChild(QComboBox, "siteOptionsSiteCombo")
+                site.setCurrentIndex(site.findText("instagram"))
+                dialog.findChild(QCheckBox, "siteOptionList_include_reels").setChecked(True)
+                video = dialog.findChild(QComboBox, "siteOptionChoice_videos")
+                self.assertGreaterEqual(video.findData("merged"), 0)
+                video.setCurrentIndex(video.findData("merged"))
+                site_search = dialog.findChild(QLineEdit, "siteOptionsSearch")
+                site_search.setText("archive-pragma")
+                editor = dialog.findChild(StructuredConfigEditor, "siteOptionStructured_archive-pragma")
+                self.assertEqual(editor.kind.count(), 1)
+                self.assertEqual(editor.kind.currentData(), "list")
+                editor.findChild(QPushButton, "structuredFillExample").click()
+                self.assertEqual(editor.value(), ["journal_mode=WAL", "synchronous=NORMAL"])
+                self.assertTrue(dialog.findChild(QCheckBox, "siteOptionAcknowledge_archive-pragma").isHidden())
+                site_search.setText("previews")
+                previews = dialog.findChild(StructuredConfigEditor, "siteOptionStructured_previews")
+                self.assertIs(previews.value(), False)
+                previews.kind.setCurrentIndex(previews.kind.findData("list"))
+                previews.add_row(value="video")
+                site_search.setText("extension-map")
+                mapping = dialog.findChild(StructuredConfigEditor, "siteOptionStructured_extension-map")
+                mapping.findChild(QPushButton, "structuredFillExample").click()
+                mapping.table.cellWidget(0, 0).setText("jpe")
+                self.assertEqual(mapping.value(), {"jpe": "jpg"})
+
+                search = dialog.findChild(QLineEdit, "configReferenceSearch")
+                value = dialog.findChild(QLineEdit, "configReferenceValue")
+                search.setText("downloader.*.retries")
+                value.setText("invalid")
+                search.setText("output.progress")
+                choice = dialog.findChild(QComboBox, "configReferenceChoice")
+                choice.setCurrentIndex(choice.findText("Disabled"))
+                search.setText("downloader.*.retries")
+                self.assertEqual(value.text(), "invalid")
+                search.setText("postprocessor.zip.compression")
+                choice.setCurrentIndex(choice.findData("zip"))
+                search.setText("postprocessor.metadata.filename")
+                value.setText("info.json")
+                dialog.findChild(QPushButton, "siteConfigSave").click()
+                self.assertEqual(json.loads(target.read_text()), {})
+                self.assertEqual(search.text(), "downloader.*.retries")
+                self.assertEqual(value.text(), "invalid")
+                value.setText("6")
+                dialog.findChild(QPushButton, "siteConfigSave").click()
+                self.assertEqual(dialog.result(), QDialog.Accepted)
+                return QDialog.Accepted
+
+            try:
+                with (
+                    patch.object(QDialog, "exec", inspect_dialog),
+                    patch.object(QMessageBox, "question", return_value=QMessageBox.Yes),
+                    patch.object(window, "show_compact_message"),
+                    patch.object(window, "_refresh_env"),
+                ):
+                    window.open_config_builder()
+                saved = json.loads(target.read_text(encoding="utf-8"))
+                instagram = saved["extractor"]["instagram"]
+                self.assertEqual(instagram["include"], ["posts", "reels"])
+                self.assertEqual(instagram["videos"], "merged")
+                self.assertEqual(instagram["previews"], ["video"])
+                self.assertEqual(instagram["archive-pragma"], ["journal_mode=WAL", "synchronous=NORMAL"])
+                self.assertEqual(instagram["extension-map"], {"jpe": "jpg"})
+                self.assertIs(saved["output"]["progress"], False)
+                self.assertEqual(saved["downloader"]["retries"], 6)
+                self.assertEqual(saved["extractor"]["postprocessors"], [{"name": "zip", "compression": "zip"}, {"name": "metadata", "filename": "info.json"}])
+            finally:
+                window.config_path = None
+                window.close()
+                app.processEvents()
+
+    def test_config_import_round_trip_and_guided_site_tasks_preserve_other_sites(self):
+        from PySide6.QtWidgets import QFileDialog
+        from gallery_dl_app.postprocessor_editor import PostprocessorEditor
+        with (
+            patch.object(ReportsMixin, "_load_autosave_silently", lambda _self: None),
+            patch.object(SystemToolsMixin, "autosave_session", lambda _self: None),
+            patch.object(ManagementMixin, "_start_management_services", lambda _self: None),
+            tempfile.TemporaryDirectory() as folder,
+        ):
+            source = Path(folder) / "example.json"
+            target = Path(folder) / "saved.json"
+            original = {"extractor": {
+                "pixiv": {"refresh-token": "test-private", "include": ["artworks", "avatar"], "postprocessors": [
+                    {"name": "metadata", "mode": "json", "event": "post", "filename": "{title} [{id}].json", "indent": 2, "ascii": False}]},
+                "pawchive": {"archive": "F:/history.sqlite3", "custom-old-option": True, "postprocessors": [
+                    {"name": "metadata", "event": "post", "indent": 2, "ascii": False}]},
+                "instagram": {"include": "posts,stories,reels,highlights", "sleep-request": "15-45"},
+                "kemonoparty": {"archive": "F:/kemono.sqlite3", "duplicates": False},
+            }, "output": {"progress": True, "colors": {"success": "1;32"}}, "netrc": False}
+            source.write_text(json.dumps(original), encoding="utf-8")
+            target.write_text("{}", encoding="utf-8")
+            app, window = package.create_application([])
+            window.config_path = str(target)
+            state = {"second": False}
+            def inspect_dialog(dialog):
+                if dialog.objectName() != "siteConfigStudio":
+                    dialog.findChild(QPushButton, "configStarterImport").click()
+                    save = next(button for button in dialog.findChildren(QPushButton) if button.text() == "Save config file")
+                    save.click()
+                    self.assertEqual(json.loads(target.read_text()), original)
+                    state["second"] = True
+                    dialog.findChild(QPushButton, "configWebsiteSettingsButton").click()
+                    return QDialog.Rejected
+                tabs = dialog.findChild(QTabWidget, "siteConfigTabs")
+                site = dialog.findChild(QComboBox, "siteOptionsSiteCombo")
+                site.setCurrentIndex(site.findText("pixiv"))
+                goal = dialog.findChild(QComboBox, "siteOptionsGoal")
+                goal.setCurrentIndex(goal.findData("after"))
+                editor = dialog.findChild(PostprocessorEditor, "postprocessorEditor")
+                self.assertIs(tabs.currentWidget(), editor)
+                self.assertEqual(editor.site.currentData(), "pixiv")
+                self.assertEqual(editor.event.currentData(), "post")
+                self.assertEqual(editor.indent.value(), 2)
+                editor.indent.setValue(4)
+                editor.site.setCurrentIndex(editor.site.findData("pawchive"))
+                self.assertEqual(editor.indent.value(), 2)
+                tabs.setCurrentIndex(0)
+                site.setCurrentIndex(site.findText("instagram"))
+                goal.setCurrentIndex(goal.findData("history"))
+                dialog.findChild(QCheckBox, "siteHistoryEnabled").setChecked(True)
+                self.assertTrue(dialog.findChild(QLineEdit, "siteOptionValue_archive").text().endswith("instagram.sqlite3"))
+                goal.setCurrentIndex(goal.findData("paths"))
+                filename = dialog.findChild(QLineEdit, "pathRuleDestination_filename")
+                filename.setText("{id}_{num:03d}.{extension}")
+                self.assertIn("12345_001.jpg", dialog.findChild(QLabel, "pathRulePreview_filename").text())
+                search = dialog.findChild(QLineEdit, "siteOptionsSearch")
+                site.setCurrentIndex(site.findText("pawchive"))
+                search.setText("custom-old-option")
+                dialog.findChild(QCheckBox, "siteOptionCheck_custom-old-option").setChecked(False)
+                dialog.findChild(QPushButton, "siteConfigSave").click()
+                self.assertEqual(dialog.result(), QDialog.Accepted)
+                return QDialog.Accepted
+            try:
+                with (
+                    patch.object(QFileDialog, "getOpenFileName", return_value=(str(source), "")),
+                    patch.object(QDialog, "exec", inspect_dialog),
+                    patch.object(QMessageBox, "question", return_value=QMessageBox.Yes),
+                    patch.object(window, "show_compact_message"),
+                    patch.object(window, "_refresh_env"),
+                ):
+                    window.open_config_builder()
+                self.assertTrue(state["second"])
+                saved = json.loads(target.read_text())
+                self.assertEqual(saved["extractor"]["pixiv"]["refresh-token"], "test-private")
+                self.assertEqual(saved["extractor"]["pixiv"]["postprocessors"][0]["indent"], 4)
+                self.assertEqual(saved["extractor"]["pawchive"]["postprocessors"], original["extractor"]["pawchive"]["postprocessors"])
+                self.assertFalse(saved["extractor"]["pawchive"]["custom-old-option"])
+                self.assertEqual(saved["extractor"]["instagram"]["include"], original["extractor"]["instagram"]["include"])
+                self.assertTrue(saved["extractor"]["instagram"]["archive"].endswith("instagram.sqlite3"))
+                self.assertEqual(saved["extractor"]["instagram"]["filename"], {"": "{id}_{num:03d}.{extension}"})
+                self.assertEqual(saved["extractor"]["kemonoparty"], original["extractor"]["kemonoparty"])
+                self.assertEqual(saved["output"], original["output"])
+                self.assertEqual(json.loads(source.read_text()), original)
+            finally:
+                window.config_path = None
+                window.close()
+                app.processEvents()
 
     def test_packaged_app_uses_its_bundled_downloader_after_session_restore(self):
         with patch.object(ReportsMixin, "_load_autosave_silently", lambda _self: None):
@@ -803,6 +1253,7 @@ class ArchitectureTests(unittest.TestCase):
                 helper.write_text(
                     "import sys\n"
                     "assert 'extractor.input=true' in sys.argv\n"
+                    "assert '--config' in sys.argv, 'active OAuth config was not forwarded'\n"
                     "print('Copy the callback code', flush=True)\n"
                     "sys.stdout.write('code: '); sys.stdout.flush()\n"
                     "code = sys.stdin.readline().strip()\n"
@@ -810,6 +1261,9 @@ class ArchitectureTests(unittest.TestCase):
                     encoding="utf-8",
                 )
                 window.gdl_cmd = subprocess.list2cmdline([sys.executable, "-u", str(helper)])
+                config = Path(folder) / "active.json"
+                config.write_text("{}", encoding="utf-8")
+                window.config_path = str(config)
 
                 def inspect(dialog):
                     dialogs.append(dialog)
@@ -940,14 +1394,14 @@ class ArchitectureTests(unittest.TestCase):
                 captured["site_studio_tabs"] = [
                     studio_tabs.tabText(index) for index in range(studio_tabs.count())
                 ]
+                advanced_tabs = dialog.findChild(QTabWidget, "siteConfigAdvancedTabs")
+                captured["site_advanced_tabs"] = [
+                    advanced_tabs.tabText(index) for index in range(advanced_tabs.count())
+                ]
                 captured["site_studio_fields"] = {
                     name: dialog.findChild(QLineEdit, name) is not None
                     for name in (
                         "siteArchivePath",
-                        "redditClientId",
-                        "redditOAuthUserAgent",
-                        "pixivRefreshToken",
-                        "pixivPhpsessid",
                         "advancedSiteOptionKey",
                     )
                 }
@@ -956,50 +1410,124 @@ class ArchitectureTests(unittest.TestCase):
                 captured["detailed_config_editor"] = (
                     scope_picker is not None
                     and site_picker is not None
-                    and not site_picker.isEditable()
+                    and site_picker.isEditable()
+                    and scope_picker.currentData() == "site"
+                    and site_picker.findText("instagram") >= 0
+                    and site_picker.findText("twitter") >= 0
+                    and dialog.findChild(QLabel, "siteConfigGuide") is not None
                     and dialog.findChild(QTableWidget, "configOptionTable") is not None
                 )
                 option_key = dialog.findChild(QComboBox, "configOptionKey")
                 option_value = dialog.findChild(QComboBox, "configOptionValue")
+                site_options = dialog.findChild(QComboBox, "siteOptionsSiteCombo")
+                captured["all_sites_have_options_page"] = (
+                    site_options is not None
+                    and site_options.count() >= 200
+                    and site_options.findText("imagefap") >= 0
+                    and site_options.findText("twitter") >= 0
+                )
+                show_all = dialog.findChild(QCheckBox, "siteOptionsShowAll")
+                captured["beginner_defaults"] = (
+                    show_all is not None
+                    and not show_all.isChecked()
+                    and dialog.findChild(QLineEdit, "siteOptionValue_archive") is not None
+                    and dialog.findChild(QLineEdit, "siteOptionValue_cookies") is None
+                    and dialog.findChild(QPushButton, "siteOptionBrowse_archive") is not None
+                    and any(
+                        "Download history file" in label.text()
+                        for label in dialog.findChildren(QLabel)
+                    )
+                )
+                show_all.setChecked(True)
+                captured["advanced_settings_available"] = dialog.findChild(
+                    QLineEdit, "siteOptionValue_cookies"
+                ) is not None
+                show_all.setChecked(False)
+                scope_picker.setCurrentIndex(scope_picker.findData("general"))
                 option_key.setCurrentIndex(option_key.findData("retries"))
                 option_value.setEditText("7")
                 dialog.findChild(QPushButton, "setConfigOption").click()
                 scope_picker.setCurrentIndex(scope_picker.findData("site"))
-                site_picker.setCurrentText("pixiv")
+                site_picker.setEditText("twit")
+                captured["site_search_waits_for_choice"] = not dialog.findChild(
+                    QPushButton, "setConfigOption"
+                ).isEnabled()
+                site_picker.setCurrentIndex(site_picker.findText("twitter"))
+                option_key.setCurrentIndex(option_key.findData("retries"))
+                option_value.setEditText("5")
+                dialog.findChild(QPushButton, "setConfigOption").click()
+                site_picker.setCurrentIndex(site_picker.findText("pixiv"))
                 option_key.setCurrentIndex(option_key.findData("metadata"))
                 option_value.setEditText("true")
                 dialog.findChild(QPushButton, "setConfigOption").click()
+                site_options.setCurrentIndex(site_options.findText("twitter"))
+                dialog.findChild(QLineEdit, "siteOptionsSearch").setText("replies")
+                reply_control = dialog.findChild(QCheckBox, "siteOptionCheck_replies")
+                captured["site_form_checkbox"] = reply_control is not None
+                reply_control.setChecked(False)
+                captured["form_waits_for_apply"] = "replies" not in dialog.findChild(
+                    QPlainTextEdit, "siteConfigDraftPreview"
+                ).toPlainText()
+                dialog.findChild(QLineEdit, "siteOptionsSearch").setText("ads")
+                dialog.findChild(QLineEdit, "siteOptionsSearch").setText("replies")
+                captured["form_keeps_pending_change"] = not dialog.findChild(
+                    QCheckBox, "siteOptionCheck_replies"
+                ).isChecked()
+                dialog.findChild(QPushButton, "applyGeneratedSiteSettings").click()
+                site_options.setCurrentIndex(site_options.findText("deviantart"))
+                captured["site_search_resets"] = not dialog.findChild(
+                    QLineEdit, "siteOptionsSearch"
+                ).text()
+                dialog.findChild(QLineEdit, "siteOptionsSearch").setText("journals")
+                captured["site_form_menu"] = dialog.findChild(
+                    QComboBox, "siteOptionChoice_journals"
+                ) is not None
+                site_options.setCurrentIndex(site_options.findText("imagefap"))
+                dialog.findChild(QLineEdit, "siteOptionsSearch").setText("archive")
+                captured["imagefap_options"] = "imagefap:" in dialog.findChild(
+                    QLabel, "siteOptionsStatus"
+                ).text()
+                dialog.findChild(QLineEdit, "siteOptionValue_archive").setText(
+                    "E:/RIPS/Database/imagefap.sqlite3"
+                )
+                dialog.findChild(QPushButton, "applyGeneratedSiteSettings").click()
                 dialog.findChild(QLineEdit, "siteArchivePath").setText(
                     "E:/RIPS/Database/kemono.sqlite3"
                 )
                 dialog.findChild(QPushButton, "applySiteArchive").click()
-                dialog.findChild(QLineEdit, "redditClientId").setText(
-                    "private-test-client-id"
+                site_options.setCurrentIndex(site_options.findText("reddit"))
+                site_search = dialog.findChild(QLineEdit, "siteOptionsSearch")
+                site_search.setText("client-id")
+                client_id = dialog.findChild(QLineEdit, "siteOptionValue_client-id")
+                captured["reddit_uses_site_form"] = client_id is not None
+                client_id.setText("private-test-client-id")
+                dialog.findChild(QCheckBox, "siteOptionAcknowledge_client-id").setChecked(True)
+                dialog.findChild(QPushButton, "applyGeneratedSiteSettings").click()
+                site_search.setText("user-agent-oauth")
+                dialog.findChild(QLineEdit, "siteOptionValue_user-agent-oauth").setText(
+                    f"Python:GdlScrape:v{package.__version__} (by /u/test)"
                 )
-                dialog.findChild(QLineEdit, "redditOAuthUserAgent").setText(
-                    "Python:GdlScrape:v1.0.2 (by /u/test)"
-                )
-                dialog.findChild(QPushButton, "applyRedditSettings").click()
-                pixiv_tab = next(index for index in range(studio_tabs.count()) if studio_tabs.tabText(index) == "Pixiv")
-                studio_tabs.setCurrentIndex(pixiv_tab)
+                dialog.findChild(QPushButton, "applyGeneratedSiteSettings").click()
+                site_options.setCurrentIndex(site_options.findText("pixiv"))
+                site_search.setText("include")
+                artwork_check = dialog.findChild(QCheckBox, "siteOptionList_include_artworks")
+                avatar_check = dialog.findChild(QCheckBox, "siteOptionList_include_avatar")
+                captured["pixiv_uses_site_form"] = artwork_check is not None and avatar_check is not None
+                avatar_check.setChecked(True)
+                dialog.findChild(QPushButton, "applyGeneratedSiteSettings").click()
+                site_search.setText("tags")
+                tags_picker = dialog.findChild(QComboBox, "siteOptionChoice_tags")
+                tags_picker.setCurrentIndex(tags_picker.findData("translated"))
+                dialog.findChild(QPushButton, "applyGeneratedSiteSettings").click()
+                site_options.setCurrentIndex(site_options.findText("pixiv-novel"))
+                site_search.setText("tags")
+                novel_tags = dialog.findChild(QComboBox, "siteOptionChoice_tags")
+                novel_tags.setCurrentIndex(novel_tags.findData("original"))
+                dialog.findChild(QPushButton, "applyGeneratedSiteSettings").click()
                 dialog.resize(860, 640)
                 dialog.show()
                 app.processEvents()
-                artwork_check = dialog.findChild(QCheckBox, "pixivInclude_artworks")
-                avatar_check = dialog.findChild(QCheckBox, "pixivInclude_avatar")
-                self.assertEqual(artwork_check.y(), avatar_check.y())
-                include_card = artwork_check.parentWidget()
-                self.assertGreater(avatar_check.x(), artwork_check.x())
-                self.assertLess(avatar_check.geometry().right(), include_card.width())
-                self.assertGreater(include_card.width(), dialog.width() * 0.75)
-                art_card = dialog.findChild(QComboBox, "pixivTags").parentWidget()
-                novel_card = dialog.findChild(QComboBox, "pixivNovelTags").parentWidget()
-                self.assertGreater(art_card.width(), dialog.width() * 0.35)
-                self.assertGreater(novel_card.width(), dialog.width() * 0.35)
                 dialog.hide()
-                dialog.findChild(QComboBox, "pixivTags").setCurrentText("translated")
-                dialog.findChild(QComboBox, "pixivNovelTags").setCurrentText("original")
-                dialog.findChild(QPushButton, "applyPixivSettings").click()
                 reference_search = dialog.findChild(QLineEdit, "configReferenceSearch")
                 reference_search.setText("output.progress")
                 dialog.findChild(QComboBox, "configReferenceType").setCurrentIndex(
@@ -1010,6 +1538,18 @@ class ArchitectureTests(unittest.TestCase):
                 captured["site_studio_preview"] = dialog.findChild(
                     QPlainTextEdit, "siteConfigDraftPreview"
                 ).toPlainText()
+                site_options.setCurrentIndex(site_options.findText("twitter"))
+                dialog.findChild(QLineEdit, "siteOptionValue_timeout").setText("60")
+                site_options.setCurrentIndex(site_options.findText("imagefap"))
+                dialog.findChild(QLineEdit, "siteOptionValue_timeout").setText("45")
+                dialog.findChild(QPushButton, "siteConfigDone").click()
+                saved_on_return = json.loads(dialog.findChild(
+                    QPlainTextEdit, "siteConfigDraftPreview"
+                ).toPlainText())["extractor"]
+                captured["done_applies_pending"] = (
+                    saved_on_return["imagefap"]["timeout"] == 45.0
+                    and saved_on_return["twitter"]["timeout"] == 60.0
+                )
                 return QDialog.Rejected
             tab_sets = [
                 [widget.tabText(index) for index in range(widget.count())]
@@ -1042,7 +1582,7 @@ class ArchitectureTests(unittest.TestCase):
             guided_mode = dialog.findChild(QComboBox, "guidedUrlMode")
             guided_target = dialog.findChild(QLineEdit, "guidedUrlTarget")
             guided_site.setCurrentText("hypnohub")
-            guided_mode.setCurrentText("tag")
+            guided_mode.setCurrentIndex(guided_mode.findData("tag"))
             guided_target.setText("sleepy cat")
             dialog.findChild(QPushButton, "guidedUrlAdd").click()
             captured["guided_url"] = any(
@@ -1061,7 +1601,7 @@ class ArchitectureTests(unittest.TestCase):
                 window.open_download_composer()
             self.assertEqual(
                 captured["tabs"],
-                ["How to use", "Download", "Options", "Login & Cookies", "Sites", "Preview"],
+                ["How to use", "1. Links and destination", "2. Options for these jobs", "Login for these jobs", "Sites", "Preview"],
             )
             self.assertEqual(captured["chart_name"], "Download Composer usage flow")
             self.assertTrue(captured["has_steps"])
@@ -1072,19 +1612,42 @@ class ArchitectureTests(unittest.TestCase):
             self.assertTrue(captured["guided_url"])
             self.assertEqual(
                 captured["site_studio_tabs"],
-                ["All Options", "Full Reference", "Archive", "Reddit", "Pixiv", "Advanced", "Safe Preview"],
+                ["Website Settings", "After downloading", "All gallery-dl settings", "Download History", "Review Changes", "More Tools"],
+            )
+            self.assertEqual(
+                captured["site_advanced_tabs"],
+                ["All Settings", "Custom Option"],
             )
             self.assertTrue(all(captured["site_studio_fields"].values()))
             self.assertTrue(captured["detailed_config_editor"])
+            self.assertTrue(captured["all_sites_have_options_page"])
+            self.assertTrue(captured["beginner_defaults"])
+            self.assertTrue(captured["advanced_settings_available"])
+            self.assertTrue(captured["done_applies_pending"])
+            self.assertTrue(captured["imagefap_options"])
+            self.assertTrue(captured["site_form_checkbox"])
+            self.assertTrue(captured["site_form_menu"])
+            self.assertTrue(captured["reddit_uses_site_form"])
+            self.assertTrue(captured["pixiv_uses_site_form"])
+            self.assertTrue(captured["site_search_resets"])
+            self.assertTrue(captured["form_waits_for_apply"])
+            self.assertTrue(captured["form_keeps_pending_change"])
+            self.assertTrue(captured["site_search_waits_for_choice"])
             self.assertIn("E:/RIPS/Database/kemono.sqlite3", captured["site_studio_preview"])
             self.assertIn('"duplicates": false', captured["site_studio_preview"])
             self.assertIn('"user-agent-oauth"', captured["site_studio_preview"])
             self.assertIn('"client-id": "<hidden>"', captured["site_studio_preview"])
             self.assertIn('"retries": 7', captured["site_studio_preview"])
+            self.assertEqual(json.loads(captured["site_studio_preview"])["extractor"]["twitter"]["retries"], 5)
+            self.assertIs(json.loads(captured["site_studio_preview"])["extractor"]["twitter"]["replies"], False)
+            self.assertEqual(
+                json.loads(captured["site_studio_preview"])["extractor"]["imagefap"]["archive"],
+                "E:/RIPS/Database/imagefap.sqlite3",
+            )
             self.assertIn('"metadata": true', captured["site_studio_preview"])
             pixiv_preview = json.loads(captured["site_studio_preview"])
             self.assertEqual(pixiv_preview["extractor"]["pixiv"]["tags"], "translated")
-            self.assertEqual(pixiv_preview["extractor"]["pixiv"]["include"], ["artworks"])
+            self.assertEqual(pixiv_preview["extractor"]["pixiv"]["include"], ["artworks", "avatar"])
             self.assertEqual(pixiv_preview["extractor"]["pixiv-novel"]["tags"], "original")
             self.assertNotIn("covers", pixiv_preview["extractor"]["pixiv"])
             self.assertIs(pixiv_preview["output"]["progress"], False)

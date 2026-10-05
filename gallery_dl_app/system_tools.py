@@ -56,6 +56,7 @@ from .core import (
     split_command,
     timestamp_slug,
     unique_path,
+    validate_finite_numbers,
 )
 from .models import DownloadJob
 from .themes import DARK_QSS, LIGHT_QSS, application_icon, apply_native_window_theme, theme_palette
@@ -105,7 +106,9 @@ class SystemToolsMixin:
         if path:
             self.edit_output.setText(path)
 
-    def final_command_for_job(self, job: DownloadJob) -> list[str]:
+    def final_command_for_job(
+        self, job: DownloadJob, *, account_config_path: str | None = None,
+    ) -> list[str]:
         # A non-started worker is reused purely as a pure command builder. Parent
         # it to the window so Qt owns and cleans it up (no "destroyed while
         # running" noise) and explicitly release it after use.
@@ -114,9 +117,9 @@ class SystemToolsMixin:
             0,
             dummy_q,
             self.gdl_cmd or "gallery-dl",
-            self.config_path,
+            account_config_path or self.config_path,
             self.edit_output.text().strip(),
-            self.combo_cookies.currentText(),
+            "none" if self.active_account_profile_id else self.combo_cookies.currentText(),
             self.spin_retries.value(),
             "",
             threading.Event(),
@@ -141,20 +144,34 @@ class SystemToolsMixin:
         if not self.jobs:
             self.show_compact_message("Command Preview", "No URL or command loaded. Paste or import at least one row first.", "info")
             return
-        lines = []
-        for i, job in enumerate(self.jobs[:50]):
-            try:
-                cmd = self.final_command_for_job(job)
-                # Display-only copy: never mutate the argv used to run the job.
-                preview = " ".join(quote_arg_for_preview(x) for x in redact_sensitive_argv(cmd))
-                lines.append(f"#{i+1} [{job.service}] {preview}")
-            except Exception as exc:
-                lines.append(
-                    f"#{i+1}: ERROR: {redact_sensitive_text(str(exc))}"
-                )
-        if len(self.jobs) > 50:
-            lines.append(f"... {len(self.jobs)-50} more")
-        self.show_scroll_message("Command Preview", "Final commands that will be executed:\n\n" + "\n".join(lines), "info")
+        account_config = None
+        try:
+            if self.active_account_profile_id:
+                account_config = self.prepare_active_account_config(for_preview=True)
+            lines = []
+            for i, job in enumerate(self.jobs[:50]):
+                try:
+                    cmd = self.final_command_for_job(job, account_config_path=account_config)
+                    # Display-only copy: never mutate the argv used to run the job.
+                    preview = " ".join(quote_arg_for_preview(x) for x in redact_sensitive_argv(cmd))
+                    lines.append(f"#{i+1} [{job.service}] {preview}")
+                except Exception as exc:
+                    lines.append(
+                        f"#{i+1}: ERROR: {redact_sensitive_text(str(exc))}"
+                    )
+            if len(self.jobs) > 50:
+                lines.append(f"... {len(self.jobs)-50} more")
+            if account_config:
+                lines.append("\nThe account config path shown is valid only while this preview is open.")
+            self.show_scroll_message("Command Preview", "Final commands that will be executed:\n\n" + "\n".join(lines), "info")
+        except Exception as exc:
+            self.show_compact_message("Command Preview", redact_sensitive_text(str(exc)), "error")
+        finally:
+            if account_config:
+                try:
+                    Path(account_config).unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def health_check(self) -> None:
         ind = self._ui_is_indonesian() if hasattr(self, "_ui_is_indonesian") else False
@@ -173,11 +190,12 @@ class SystemToolsMixin:
         # detect_config_path() may return a default *candidate* path even before
         # the file exists. Health Check must not mark a planned path as OK.
         if self.config_path:
-            cfg = Path(str(self.config_path)).expanduser()
+            cfg = safe_expand_path(self.config_path)
             if cfg.is_file():
                 if cfg.suffix.lower() == ".json":
                     try:
                         parsed_config = json.loads(read_text_safely(cfg))
+                        validate_finite_numbers(parsed_config)
                         if not isinstance(parsed_config, dict):
                             raise ValueError("config root must be a JSON object")
                         checks.append(("[OK] config JSON valid: " if ind else "[OK] config JSON valid: ") + str(cfg))
@@ -193,7 +211,7 @@ class SystemToolsMixin:
         else:
             checks.append("[WARNING] config belum terdeteksi" if ind else "[WARNING] config not detected")
 
-        out = Path(self.edit_output.text().strip() or ".").expanduser()
+        out = safe_expand_path(self.edit_output.text().strip() or ".")
         try:
             out.mkdir(parents=True, exist_ok=True)
             usage = shutil.disk_usage(out)
@@ -214,7 +232,14 @@ class SystemToolsMixin:
         if self.version_worker and self.version_worker.isRunning():
             self.show_compact_message("Check gallery-dl version", "Version check is already running.", "info")
             return
-        self.btn_version_side.setEnabled(False)
+        def set_version_buttons_enabled(enabled: bool) -> None:
+            legacy_button = getattr(self, "btn_version_side", None)
+            if legacy_button is not None:
+                legacy_button.setEnabled(enabled)
+            for button in self.findChildren(QPushButton, "applicationTools_version"):
+                button.setEnabled(enabled)
+
+        set_version_buttons_enabled(False)
         self.append_log("[system] checking gallery-dl version...")
         old = self.version_worker
         if old is not None:
@@ -225,7 +250,7 @@ class SystemToolsMixin:
         self.version_worker = CommandProbeWorker(self.gdl_cmd, ["--version"], timeout=12, parent=self)
 
         def finish(output: str, rc: int, error: str) -> None:
-            self.btn_version_side.setEnabled(True)
+            set_version_buttons_enabled(True)
             if error or rc != 0 or not is_gallery_dl_version_output(output):
                 if error:
                     detail = error
@@ -259,7 +284,7 @@ class SystemToolsMixin:
                 "warning",
             )
             return
-        p = Path(self.config_path).expanduser()
+        p = safe_expand_path(self.config_path)
         if p.exists() and not p.is_file():
             self.show_compact_message(
                 "Config",
@@ -1137,7 +1162,7 @@ Notes:
         if not self.config_path:
             self.show_compact_message("Config", "Config path is not detected.", "warning")
             return
-        p = Path(self.config_path).expanduser()
+        p = safe_expand_path(self.config_path)
         if p.exists() and not p.is_file():
             self.show_compact_message("Config", f"Config path is not a file:\n{p}", "warning")
             return
@@ -1150,7 +1175,7 @@ Notes:
                 except Exception as exc:
                     self.show_compact_message("Create config failed", str(exc), "error")
             return
-        if p.suffix.lower() == ".json":
+        if p.suffix.lower() in {".json", ".conf"}:
             try:
                 text = read_text_safely(p)
                 # Detect duplicate keys. Standard json.loads silently keeps only
@@ -1163,12 +1188,13 @@ Notes:
                 def _dup_hook(pairs: list[tuple[str, object]]) -> dict:
                     seen: set[str] = set()
                     for key, _value in pairs:
-                        if key in seen:
+                        if key in seen and not key.startswith("#"):
                             dup_keys.append(key)
                         seen.add(key)
                     return dict(pairs)
 
                 parsed_config = json.loads(text, object_pairs_hook=_dup_hook)
+                validate_finite_numbers(parsed_config)
                 if not isinstance(parsed_config, dict):
                     raise ValueError("Config root must be a JSON object")
                 if dup_keys:
@@ -1268,6 +1294,9 @@ Notes:
             self.show_compact_message("Load session failed", f"Session file cannot be loaded:\n{exc}", "error")
 
     def session_data(self) -> dict:
+        commands = getattr(self, "_scheduled_queue_restore", None)
+        if not isinstance(commands, str):
+            commands = self.txt_commands.toPlainText()
         persisted_gdl_cmd = self.gdl_cmd or ""
         if redact_sensitive_text(persisted_gdl_cmd) != persisted_gdl_cmd:
             # The executable field is not an authentication store. Omitting a
@@ -1276,7 +1305,7 @@ Notes:
             persisted_gdl_cmd = ""
         return {
             "schema": 4,
-            "commands": redact_sensitive_database_text(self.txt_commands.toPlainText()),
+            "commands": redact_sensitive_database_text(commands),
             "gdl_cmd": persisted_gdl_cmd,
             "config_path": self.config_path,
             "output_dir": self.edit_output.text(),
@@ -1346,7 +1375,8 @@ Notes:
                 )
             else:
                 self.gdl_cmd = saved_cmd
-        self.config_path = data.get("config_path") or self.config_path
+        if "config_path" in data:
+            self.config_path = data.get("config_path") or None
         self.edit_output.setText(str(data.get("output_dir") or "./downloads"))
         self.spin_workers.setValue(safe_int(data.get("workers"), 3, 1, 32))
         cookies = str(data.get("cookies") or "none")

@@ -1,0 +1,9 @@
+{
+  "#": "Adapted from maintainer advice in gallery-dl discussion 7036. Choose your history location; existing IDs are not migrated.",
+  "extractor": {
+    "pixiv": {
+      "archive": "./pixiv-history.sqlite3",
+      "archive-format": "{id}{suffix}.{extension}"
+    }
+  }
+}

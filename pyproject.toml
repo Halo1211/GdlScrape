@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gdlscrape"
-version = "1.0.2"
+version = "1.0.3"
 description = "A visual gallery download manager powered by gallery-dl."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "PySide6>=6.6",
-  "gallery-dl>=1.32.10",
+  "gallery-dl>=1.32.14",
   "keyring>=25.0",
   "openpyxl>=3.1",
   "Pillow>=12.3.0",
@@ -54,7 +54,7 @@ py-modules = ["gdlscrape"]
 include = ["gallery_dl_app*"]
 
 [tool.setuptools.package-data]
-gallery_dl_app = ["assets/*.png", "assets/*.json"]
+gallery_dl_app = ["assets/*.png", "assets/*.json", "assets/config-examples/*.json"]
 
 [tool.ruff]
 target-version = "py310"

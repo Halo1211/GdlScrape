@@ -1,26 +1,52 @@
 # Contributing to GdlScrape
 
-Thank you for helping improve GdlScrape. Before substantial work, open an issue describing the problem and proposed behavior so the scope can be agreed first.
+For substantial changes, open an issue describing the problem and proposed
+behavior before implementation. Keep pull requests focused on one change.
 
-## Local setup
+## Set up the project
 
 ```powershell
-py -m venv .venv
+python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-py -m pip install -e ".[dev]"
+python -m pip install -e ".[dev]"
 ```
 
-## Before a pull request
+On Linux or macOS, use `source .venv/bin/activate` to activate the environment.
+Run the application with `python -m gallery_dl_app`.
+
+## Validate changes
 
 ```powershell
-ruff check .
-py -m unittest discover -s tests -v
+python -m ruff check .
+python -m pytest -q
 ```
 
-Keep changes focused and add a regression test for parser, worker, persistence, or security-boundary changes. Do not include account details, cookies, tokens, downloaded media, application data, or generated caches.
+Pytest runs both function-based tests and the existing unittest cases. CI runs
+these checks on Windows with Python 3.10 and 3.12.
 
-The architecture and security rules in [ARCHITECTURE.md](ARCHITECTURE.md) are part of the contribution contract.
+Add regression coverage for changes to parsing, config preservation, persistence,
+worker lifecycles, or credential handling. For visual changes, check the relevant
+screens in both themes. Read [ARCHITECTURE.md](ARCHITECTURE.md) before changing
+module boundaries.
 
-## Licensing note
+## Prepare a pull request
 
-By contributing to GdlScrape, you agree that your contributions are provided under the project's [MIT License](LICENSE).
+1. Explain the problem and resulting behavior.
+2. Include the checks you ran and any remaining limitations.
+3. Update user documentation and the changelog when behavior changes.
+4. Use demo data for screenshots; remove usernames, personal paths, and tokens.
+
+Do not include account data, cookies, private URLs, downloaded media, application
+backups, or generated build files. Report vulnerabilities privately as described
+in [SECURITY.md](SECURITY.md).
+
+## Build a Windows package
+
+Run `.\scripts\build_windows.ps1` from PowerShell. The build includes gallery-dl,
+its dynamic modules, configuration assets, and Windows version metadata. Test the
+complete extracted folder, including a local download and any changed processing
+features, before distributing the ZIP.
+
+## License
+
+Contributions are provided under the project's [MIT License](LICENSE).

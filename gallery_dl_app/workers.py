@@ -5,6 +5,7 @@ import queue
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import tempfile
 import threading
@@ -21,11 +22,16 @@ from .core import (
     STOP_GRACE_SECONDS,
     classify_error,
     command_string_to_argv,
+    insert_gallery_dl_arguments,
     ensure_no_option,
+    is_gallery_dl_invocation,
+    is_link_or_reparse,
+    iter_tree_entries,
     normalize_destination_argv,
     normalize_process_return_code,
     redact_sensitive_argv,
     redact_sensitive_text,
+    safe_expand_path,
     sanitize_service_policy,
     split_command,
     strip_gallery_dl_invocation,
@@ -66,7 +72,7 @@ class DownloadWorker(QThread):
     re_skip = re.compile(r"^# ")
     re_error = re.compile(r"\b(error|exception|traceback|failed)\b", re.I)
     re_warn = re.compile(r"\b(warning|warn)\b", re.I)
-    re_download = re.compile(r"(?:^|\s)(?:[A-Za-z]:[\\/]|/|\\\\|\./|\.\\)")
+    re_download = re.compile(r"^(?:[A-Za-z]:[\\/]|/|\\\\|\./|\.\\)")
     # Two jobs can legitimately point at the same explicit destination. Keep
     # conversion/archive passes serialized so they never rewrite one archive
     # concurrently or race over the same PNG files.
@@ -170,36 +176,51 @@ class DownloadWorker(QThread):
             tokens = normalize_destination_argv(split_command(job.raw))
             args = tokens if len(tokens) > 1 else [job.raw]
 
-        final = list(base)
-        config_path = Path(self.config_path).expanduser() if self.config_path else None
+        extra_args = normalize_destination_argv(split_command(self.extra_args))
+        # Only gallery-dl's arguments count as explicit overrides. Python
+        # launchers and arbitrary fixture/wrapper commands have their own flags.
+        base_args = strip_gallery_dl_invocation(base) if is_gallery_dl_invocation(base) else []
+        if "--" in base_args:
+            boundary = base_args.index("--")
+            explicit_args = base_args[:boundary] + extra_args + base_args[boundary:] + args
+        else:
+            explicit_args = base_args + extra_args + args
+        defaults: list[str] = []
+        config_path = safe_expand_path(self.config_path) if self.config_path else None
         if config_path and config_path.is_file() and ensure_no_option(
-            args,
+            explicit_args,
             ("-c", "--config", "--config-ignore"),
         ):
-            final += ["--config", str(config_path)]
+            defaults += ["--config", str(config_path)]
         if self.output_dir and job.dest == "-" and ensure_no_option(
-            args,
+            explicit_args,
             ("-d", "--destination", "-D", "--directory"),
         ):
-            final += ["-d", self.output_dir]
+            defaults += ["-d", self.output_dir]
         if self.cookies_browser and self.cookies_browser != "none" and ensure_no_option(
-            args,
+            explicit_args,
             ("--cookies-from-browser", "-C", "--cookies"),
         ):
-            final += ["--cookies-from-browser", self.cookies_browser]
+            defaults += ["--cookies-from-browser", self.cookies_browser]
         # gallery-dl accepts both -R and --retries; recognize the short form so a
         # user-supplied "-R 5" in the row is not duplicated by a GUI --retries
         # (same class of bug as the -c/--config fix in stab3.0).
         policy_retries = int(self.job_policy(job).get("retries", self.retries) or 0)
-        if policy_retries > 0 and ensure_no_option(args, ("-R", "--retries")):
-            final += ["--retries", str(policy_retries)]
-        if self.extra_args:
-            final += split_command(self.extra_args)
+        if policy_retries > 0 and ensure_no_option(explicit_args, ("-R", "--retries")):
+            defaults += ["--retries", str(policy_retries)]
+        final = list(base)
+        if "--" in base_args:
+            boundary = len(base) - len(base_args) + base_args.index("--")
+            final[boundary:boundary] = defaults + extra_args
+        else:
+            final += defaults + extra_args
         final += args
         return final
 
     def terminate_current_process(self) -> None:
-        proc = self._proc
+        self._terminate_process(self._proc)
+
+    def _terminate_process(self, proc: Optional[subprocess.Popen]) -> None:
         if not proc or proc.poll() is not None:
             return
         try:
@@ -246,8 +267,14 @@ class DownloadWorker(QThread):
                 pass
 
     def _terminate_current_process_async(self) -> None:
+        # Capture the child before dispatch. A delayed termination thread must
+        # never look up _proc after the worker has advanced to a different job.
+        proc = self._proc
+        if proc is None:
+            return
         threading.Thread(
-            target=self.terminate_current_process,
+            target=self._terminate_process,
+            args=(proc,),
             name=f"gallery-dl-kill-w{self.worker_id + 1}",
             daemon=True,
         ).start()
@@ -256,9 +283,9 @@ class DownloadWorker(QThread):
         # Cancel only the selected active process. Do not set the shared stop_event,
         # because that would stop the whole batch when the user cancels one row.
         with self._lock:
-            is_current = self.current_job_idx == idx
-        if is_current:
-            self._terminate_current_process_async()
+            if self.current_job_idx == idx:
+                # Capture the child while the job identity is still locked.
+                self._terminate_current_process_async()
 
     def postprocessing_interrupted(self) -> bool:
         with self._lock:
@@ -278,7 +305,7 @@ class DownloadWorker(QThread):
         target = job.dest
         if not target:
             return "post-processing skipped: destination unknown"
-        folder = Path(target).expanduser()
+        folder = safe_expand_path(target)
         if not folder.exists() or not folder.is_dir():
             return f"compression skipped: folder not found: {folder}"
 
@@ -289,11 +316,15 @@ class DownloadWorker(QThread):
                 converted = 0
                 failed = 0
                 skipped_existing = 0
-                for png in folder.rglob("*.png"):
+                for png, metadata in iter_tree_entries(folder):
                     if self.postprocessing_interrupted():
                         self.log.emit(self.worker_id, "[post] PNG to WebP stopped")
                         break
-                    if png.is_symlink():
+                    if (
+                        is_link_or_reparse(metadata)
+                        or not stat.S_ISREG(metadata.st_mode)
+                        or png.suffix.lower() != ".png"
+                    ):
                         continue
                     webp = png.with_suffix(".webp")
                     # Retries and multiple jobs sharing one destination hit the
@@ -351,16 +382,18 @@ class DownloadWorker(QThread):
             try:
                 temporary = _secure_temporary_path(archive)
                 with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-                    for file in folder.rglob("*"):
+                    for file, metadata in iter_tree_entries(folder):
                         if self.postprocessing_interrupted():
                             raise InterruptedError("post-processing stopped")
                         # Never include the archive we are currently writing.
                         if (
-                            not file.is_symlink()
-                            and file.is_file()
+                            not is_link_or_reparse(metadata)
+                            and stat.S_ISREG(metadata.st_mode)
                             and file.resolve() not in {archive.resolve(), temporary.resolve()}
                         ):
                             zf.write(file, file.relative_to(folder.parent))
+                if self.postprocessing_interrupted():
+                    raise InterruptedError("post-processing stopped")
                 os.replace(temporary, archive)
                 success = f"compressed: {archive}"
                 return "; ".join([*conversion_errors, success])
@@ -387,6 +420,13 @@ class DownloadWorker(QThread):
         archive_path = Path(str(folder) + f".{fmt}")
         temporary_path: Path | None = None
         try:
+            # The external archiver controls recursion itself. Reject linked
+            # trees before spawning it, since it may follow Windows junctions.
+            for _file, metadata in iter_tree_entries(folder):
+                if self.postprocessing_interrupted():
+                    return "post-processing stopped"
+                if is_link_or_reparse(metadata):
+                    raise ValueError("destination contains links or reparse points; use ZIP to skip them")
             # Reserve a private name, then remove the empty placeholder because
             # 7-Zip expects to create the archive itself. The random mkstemp
             # component prevents stale/colliding predictable names.
@@ -521,8 +561,16 @@ class DownloadWorker(QThread):
                 if self._proc.stdout is None:
                     raise RuntimeError("subprocess stdout is unavailable")
 
-                interrupted = False
+                # Stop/Cancel may arrive inside Popen, before the child handle
+                # is published. Kill it before entering a potentially silent,
+                # blocking pipe read; the earlier asynchronous stop had no
+                # process handle to terminate in that race.
+                interrupted = self.stop_event.is_set() or self.is_cancelled(idx)
+                if interrupted:
+                    self.terminate_current_process()
                 while True:
+                    if interrupted:
+                        break
                     # ``for line in pipe``/unbounded ``readline()`` allocates
                     # the complete line before the GUI can truncate it.  A
                     # malformed downloader (or remote metadata echoed without
@@ -558,12 +606,12 @@ class DownloadWorker(QThread):
                     tail_lines = tail_lines[-20:]
                     if self.re_skip.search(text):
                         skipped += 1
+                    elif self.re_download.search(text):
+                        downloaded += 1
                     elif self.re_error.search(text):
                         errors += 1
                     elif self.re_warn.search(text):
                         warnings += 1
-                    elif self.re_download.search(text):
-                        downloaded += 1
                     self.log.emit(self.worker_id, text)
                     progress_total = downloaded + skipped + errors + warnings
                     now = time.monotonic()
@@ -604,8 +652,15 @@ class DownloadWorker(QThread):
                 elif rc == 0:
                     status = "done"
                     message = "done"
-                    with self._postprocess_lock:
-                        post_msg = self.maybe_compress(job)
+                    post_msg = ""
+                    while not self.stop_event.is_set() and not self.is_cancelled(idx):
+                        if self._postprocess_lock.acquire(timeout=0.1):
+                            try:
+                                if not self.stop_event.is_set() and not self.is_cancelled(idx):
+                                    post_msg = self.maybe_compress(job)
+                            finally:
+                                self._postprocess_lock.release()
+                            break
                     if post_msg:
                         self.log.emit(self.worker_id, f"[post] {post_msg}")
                         if re.search(
@@ -648,6 +703,22 @@ class DownloadWorker(QThread):
                     self.log.emit(self.worker_id, f"[ERROR] [{idx+1}]: {message}")
             finally:
                 message = redact_sensitive_text(message)
+                # A read/wait/post-processing exception can bypass normal pipe
+                # cleanup. Never discard a live child handle and advance the
+                # queue while that process is still writing to the destination.
+                if self._proc is not None:
+                    try:
+                        if self._proc.poll() is None:
+                            self.terminate_current_process()
+                            self._proc.wait(timeout=2)
+                    except Exception:
+                        pass
+                    for stream in (self._proc.stdout, self._proc.stderr):
+                        if stream is not None:
+                            try:
+                                stream.close()
+                            except Exception:
+                                pass
                 if acquired_service_lock is not None:
                     try:
                         acquired_service_lock.release()
@@ -690,10 +761,11 @@ class CommandProbeWorker(QThread):
 
     def run(self) -> None:
         cmd: list[str] = []
+        cp = None
         try:
             if self._probe_stopped.is_set():
                 return
-            cmd = command_string_to_argv(self.command) + self.args
+            cmd = insert_gallery_dl_arguments(command_string_to_argv(self.command), self.args)
             if not cmd:
                 raise FileNotFoundError("command is empty")
             creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if IS_WINDOWS else 0
@@ -718,12 +790,18 @@ class CommandProbeWorker(QThread):
                 was_user_stopped = self._probe_stopped.is_set()
                 self.stop()
                 try:
-                    stdout, stderr = cp.communicate(timeout=2)
-                except subprocess.TimeoutExpired:
-                    cp.kill()
-                    stdout, stderr = cp.communicate()
-                if not was_user_stopped:
-                    self.done.emit("", -1, _redact_exception_with_argv(exc, cmd))
+                    try:
+                        cp.communicate(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        cp.kill()
+                        cp.communicate(timeout=2)
+                except (OSError, subprocess.TimeoutExpired):
+                    # Cleanup errors must not suppress the original timeout,
+                    # or turn the bounded probe into an unbounded pipe wait.
+                    pass
+                finally:
+                    if not was_user_stopped:
+                        self.done.emit("", -1, _redact_exception_with_argv(exc, cmd))
                 return
             streams = [
                 stream.strip()
@@ -740,6 +818,19 @@ class CommandProbeWorker(QThread):
             if not self._probe_stopped.is_set():
                 self.done.emit("", -1, _redact_exception_with_argv(exc, cmd))
         finally:
+            if cp is not None:
+                try:
+                    if cp.poll() is None:
+                        cp.kill()
+                        cp.wait(timeout=2)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+                for stream in (cp.stdout, cp.stderr):
+                    if stream is not None:
+                        try:
+                            stream.close()
+                        except OSError:
+                            pass
             with self._probe_lock:
                 self._probe_proc = None
 

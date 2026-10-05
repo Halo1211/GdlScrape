@@ -47,7 +47,7 @@ from gallery_dl_app.reports import (
 )
 from gallery_dl_app.secure_vault import SecretVault
 from gallery_dl_app.system_tools import SystemToolsMixin, is_gallery_dl_version_output
-from gallery_dl_app.url_builder import URL_RECIPE_MODES, build_site_url
+from gallery_dl_app.url_builder import URL_RECIPE_MODES, build_site_url, url_recipe_fields
 from gallery_dl.formatter import StringFormatter
 from gallery_dl_app.oauth_flow import local_oauth_callback_url, oauth_flow_guidance
 
@@ -886,7 +886,8 @@ class DownloadComposerTests(unittest.TestCase):
         }
         for site, modes in URL_RECIPE_MODES.items():
             for mode in modes:
-                target = ("patreon:12345:67890" if site == "kemono" and mode == "post"
+                target = (":".join(field[2] for field in url_recipe_fields(site, mode)) if site in {"instagram", "bluesky", "tumblr", "pinterest", "imgur", "artstation", "mangadex", "patreon", "coomer"}
+                          else "patreon:12345:67890" if site == "kemono" and mode == "post"
                           else "patreon:12345" if site == "kemono" else samples[mode])
                 with self.subTest(site=site, mode=mode):
                     url, subcategory = build_site_url(site, mode, target)
@@ -942,6 +943,8 @@ class DownloadComposerTests(unittest.TestCase):
         self.assertEqual(pixiv["archive"].scope, "general")
         self.assertEqual(pixiv["ugoira"].scope, "site")
         self.assertEqual(pixiv["include"].value_type, "json")
+        self.assertIn("avatar", pixiv["include"].choices)
+        self.assertIn("original", pixiv["tags"].choices)
         self.assertIn("duplicates", kemono)
         self.assertIn("archives-format", kemono)
         self.assertIn("client-id", reddit)
@@ -2012,6 +2015,7 @@ class SpreadsheetImportTests(unittest.TestCase):
 class SystemPathValidationTests(unittest.TestCase):
     def test_command_preview_redacts_secrets_from_builder_exceptions(self):
         harness = MagicMock()
+        harness.active_account_profile_id = None
         harness._rebuild_from_text.return_value = True
         harness.jobs = [gui.parse_line("https://example.com/a")]
         harness.final_command_for_job.side_effect = RuntimeError(
@@ -2474,6 +2478,7 @@ class DropImportTests(unittest.TestCase):
 
     def test_dry_run_accepts_input_file_and_oauth_commands(self):
         harness = MagicMock()
+        harness.active_account_profile_id = None
         harness._rebuild_from_text.return_value = True
         harness.jobs = [
             gui.parse_line("gallery-dl -i urls.txt"),

@@ -1,0 +1,12 @@
+{
+  "#": "Adapted from gallery-dl discussion 2872 using the built-in zip.files option. Keeps originals; no external zip command.",
+  "extractor": {
+    "mangadex": {
+      "lang": "en",
+      "postprocessors": [
+        {"name": "metadata", "mode": "json", "event": "init", "filename": "info.json", "indent": 2, "ascii": false},
+        {"name": "zip", "extension": "cbz", "compression": "store", "keep-files": true, "files": ["info.json"]}
+      ]
+    }
+  }
+}

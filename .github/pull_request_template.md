@@ -1,14 +1,18 @@
-## Summary
+## Change
 
-Describe the user-visible change and why it is needed.
+Describe the problem and the resulting behavior.
 
 ## Validation
 
-- [ ] `ruff check .`
-- [ ] `py -m unittest discover -s tests -v`
-- [ ] GUI behavior was checked in dark and light themes when applicable.
-- [ ] No credentials, private URLs, downloaded media, or application data are included.
+- [ ] `python -m ruff check .`
+- [ ] `python -m pytest -q`
+- [ ] Relevant GUI changes checked in both themes.
+- [ ] Documentation updated when behavior changed.
+- [ ] No credentials, personal paths, private URLs, or application data included.
+
+List any remaining limitations or checks that could not be completed.
 
 ## Screenshots
 
-Add before/after images for visual changes, or write “Not applicable.”
+For visual changes, include screenshots using demo data. Otherwise, remove this
+section.
