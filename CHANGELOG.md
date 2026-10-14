@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.4 — 2026-10-14
+## 1.0.4 — 2026-10-15
 
 ### Fixed
 
@@ -14,8 +14,8 @@
 - Decimal filter IDs with leading zeroes produce valid expressions.
 - CSV/XLSX imports reject duplicate column names before losing source data.
 - Cookies with empty values remain valid, and Link Builder rejects invalid ports.
-- Test sessions release their Qt application before interpreter shutdown on
-  Windows.
+- Tests release their widgets between cases and their Qt application before
+  interpreter shutdown on Windows.
 
 ### Changed
 
