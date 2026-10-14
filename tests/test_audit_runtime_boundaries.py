@@ -203,4 +203,3 @@ def test_real_local_gallery_dl_download_and_simulation_preserve_mode(tmp_path, s
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
-

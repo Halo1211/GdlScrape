@@ -84,4 +84,3 @@ def test_netscape_cookies_with_empty_values_are_valid(tmp_path, prefix):
 def test_complete_link_validation_rejects_invalid_explicit_ports(port):
     with pytest.raises(ValueError):
         validate_supported_url(f"https://example.com:{port}/file.jpg")
-
