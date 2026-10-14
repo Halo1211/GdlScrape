@@ -143,7 +143,8 @@ class UiShellMixin:
             'Paste URL or full gallery-dl command here. One entry per line.\nExample: gallery-dl -d "F:\\Rips\\Download\\Creator" https://example.com/post/123 --no-check-certificate'
         )
         self.txt_commands.setMinimumHeight(235)
-        self.txt_commands.setMaximumBlockCount(20000)
+        # Keep input intact so parser limits reject it without losing jobs.
+        self.txt_commands.setMaximumBlockCount(0)
         self.txt_commands.textChanged.connect(self.on_text_changed)
         input_l.addWidget(self.txt_commands, 1)
 

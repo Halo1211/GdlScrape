@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.0.4 — 2026-10-14
+
+### Fixed
+
+- Simulation and inspection jobs no longer run the GUI's archive or WebP processing.
+- Finished download threads remain valid while other workers are running, so
+  stopping and closing a mixed batch cannot access deleted Qt objects.
+- Queue input retains every line, and row actions revalidate drafts rejected by
+  an earlier debounce instead of overwriting them with stale jobs.
+- Site option edits replace dictionary values without restoring removed entries;
+  rule order and explicit empty objects appear in the unsaved-change review.
+- Decimal filter IDs with leading zeroes produce valid expressions.
+- CSV/XLSX imports reject duplicate column names before losing source data.
+- Cookies with empty values remain valid, and Link Builder rejects invalid ports.
+
+### Changed
+
+- Public documentation uses English and omits internal audit notes.
+- CI builds Python distributions alongside lint and regression checks.
+
 ## 1.0.3 — 2026-10-05
 
 ### Added

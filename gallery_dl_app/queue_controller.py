@@ -70,6 +70,18 @@ def _validate_import_record(row_number: int, *values: object) -> None:
             )
 
 
+def _validate_import_headers(headers: list[str]) -> None:
+    """A duplicate name would silently overwrite a previous source column."""
+    seen: set[str] = set()
+    for header in headers:
+        name = str(header).strip().lower()
+        if not name:
+            continue
+        if name in seen:
+            raise ValueError(f"Duplicate import column: {name}. Use unique column names.")
+        seen.add(name)
+
+
 def validate_xlsx_archive(path: str | Path) -> None:
     """Reject malformed or expansion-heavy XLSX archives before openpyxl."""
     try:
@@ -280,6 +292,7 @@ class QueueControllerMixin:
         except ValueError as exc:
             self.show_compact_message("Queue input rejected", str(exc), "error")
             return False
+        self._last_parsed_queue_text = text
         # Preview, validation, and library import also rebuild the queue. Keep
         # results, selections, and enabled flags when its definition is unchanged.
         previous = [(job.raw, job.tag, job.notes) for job in getattr(self, "jobs", [])]
@@ -374,6 +387,7 @@ class QueueControllerMixin:
             reader = csv.DictReader(io.StringIO(text), dialect=dialect)
             fieldnames = [str(x or "").strip().lower() for x in (reader.fieldnames or [])]
             if set(fieldnames) & known_headers:
+                _validate_import_headers(fieldnames)
                 recognized_schema = True
                 for row_number, row in enumerate(reader, start=2):
                     _validate_import_record(row_number, *(row.values()))
@@ -465,6 +479,7 @@ class QueueControllerMixin:
             output: list[str] = []
             current_tag = ""
             if header_set & known:
+                _validate_import_headers(headers)
                 for row_number, values in enumerate(iterator, start=2):
                     _validate_import_record(row_number, *values)
                     if not values:
@@ -716,6 +731,8 @@ class QueueControllerMixin:
         self._update_counts()
 
     def copy_selected_url(self) -> None:
+        if not self._flush_pending_text_edits():
+            return
         idxs = self.selected_indices()
         if not idxs:
             # Do not silently WIPE the clipboard when nothing is selected.
@@ -726,6 +743,8 @@ class QueueControllerMixin:
         )
 
     def copy_selected_command(self) -> None:
+        if not self._flush_pending_text_edits():
+            return
         idxs = self.selected_indices()
         if not idxs:
             self.show_compact_message("Copy Command", "Select at least one queue row first.", "info")
@@ -735,6 +754,8 @@ class QueueControllerMixin:
         )
 
     def open_selected_destination(self) -> None:
+        if not self._flush_pending_text_edits():
+            return
         idxs = self.selected_indices()
         if not idxs:
             return
@@ -751,7 +772,11 @@ class QueueControllerMixin:
 
     def _flush_pending_text_edits(self) -> bool:
         """Keep queue actions from overwriting text awaiting its debounce."""
-        if getattr(self, "_text_debounce", None) is not None and self._text_debounce.isActive():
+        last_parsed = getattr(self, "_last_parsed_queue_text", None)
+        unparsed_text = isinstance(last_parsed, str) and self.txt_commands.toPlainText() != last_parsed
+        if unparsed_text or (getattr(self, "_text_debounce", None) is not None and self._text_debounce.isActive()):
+            # A failed debounce stops its timer but leaves the previous model
+            # intact. Revalidate that draft before acting on stale row indices.
             table = getattr(self, "tbl_queue", None)
             selected = set(self.selected_indices()) if table is not None else set()
             occurrences: dict[tuple[str, str, str], int] = {}
@@ -1096,7 +1121,9 @@ class QueueControllerMixin:
                 worker.job_started.connect(self.on_job_started)
                 worker.job_done.connect(self.on_job_done)
                 worker.finished_all.connect(self.on_worker_finished)
-                worker.finished.connect(worker.deleteLater)
+                # Retain finished threads until the batch is replaced (or the
+                # window is destroyed). Stop/close and startup rollback still
+                # iterate this list while other workers can be running.
                 self.workers.append(worker)
             for worker in self.workers:
                 worker.start()

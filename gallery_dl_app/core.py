@@ -26,7 +26,7 @@ IS_MACOS = platform.system() == "Darwin"
 
 APP_NAME = "GdlScrape"
 
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.0.4"
 
 APP_DIR = Path.home() / ".gallery_dl_gui_dashboard"
 
@@ -466,7 +466,9 @@ def validate_cookies_txt(path: str) -> tuple[bool, str]:
     except Exception as exc:
         return False, f"Could not read cookies.txt: {exc}"
     for raw_line in text.splitlines():
-        line = raw_line.strip()
+        # The last column can be an empty cookie value. Stripping its trailing
+        # tab removes that column and rejects a valid Netscape cookie row.
+        line = raw_line.lstrip()
         if not line:
             continue
         if line.startswith("#HttpOnly_"):

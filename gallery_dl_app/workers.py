@@ -217,6 +217,17 @@ class DownloadWorker(QThread):
         final += args
         return final
 
+    def command_allows_postprocessing(self, cmd: list[str]) -> bool:
+        """GUI transformations must not change files during inspection jobs."""
+        args = strip_gallery_dl_invocation(cmd)
+        return ensure_no_option(args, (
+            "-s", "--simulate", "--no-download",
+            "-g", "--get-urls", "-G", "--resolve-urls",
+            "-j", "--dump-json", "-J", "--resolve-json",
+            "-K", "--list-keywords", "-E", "--extractor-info",
+            "--list-modules", "--list-extractors", "--version", "-h", "--help",
+        ))
+
     def terminate_current_process(self) -> None:
         self._terminate_process(self._proc)
 
@@ -653,7 +664,7 @@ class DownloadWorker(QThread):
                     status = "done"
                     message = "done"
                     post_msg = ""
-                    while not self.stop_event.is_set() and not self.is_cancelled(idx):
+                    while self.command_allows_postprocessing(cmd) and not self.stop_event.is_set() and not self.is_cancelled(idx):
                         if self._postprocess_lock.acquire(timeout=0.1):
                             try:
                                 if not self.stop_event.is_set() and not self.is_cancelled(idx):

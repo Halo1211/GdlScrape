@@ -633,7 +633,10 @@ def apply_config_editor_drafts(
         block = copy.deepcopy(current) if isinstance(current, dict) else {}
         for key in removals.get(category, ()):
             block.pop(str(key), None)
-        block = _merge_dict(block, (site_overrides or {}).get(category, {}))
+        # Each draft value represents the entire edited option. Deep-merging
+        # cookie/header maps or ordered path rules resurrects removed entries
+        # and keeps the old rule order. Preserve peers at the site level only.
+        block.update(copy.deepcopy((site_overrides or {}).get(category, {})))
         if block:
             extractor[category] = block
         else:
@@ -4883,7 +4886,7 @@ class ComposerMixin:
                 or bool(site_overrides)
                 or bool(path_overrides or path_removals)
             )
-            if requires_saved_config and proposed_config() != existing_config:
+            if requires_saved_config and config_changes(existing_config, proposed_config()):
                 answer = QMessageBox.question(
                     dlg,
                     tr("Save defaults first", "Simpan default terlebih dahulu"),

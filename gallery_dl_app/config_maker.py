@@ -42,17 +42,20 @@ def filename_example(pattern: str, site: str) -> str:
 def apply_config_delta(original: dict, baseline: dict, edited: dict) -> dict:
     """Apply only GUI changes, keeping imported values that controls normalize."""
     result = copy.deepcopy(original)
-    for key in set(baseline) | set(edited):
+    for key in dict.fromkeys((*baseline, *edited)):
         if key not in edited:
             result.pop(key, None)
         elif key not in baseline:
             result[key] = copy.deepcopy(edited[key])
-        elif type(baseline[key]) is type(edited[key]) and baseline[key] == edited[key]:
-            continue
         elif isinstance(baseline[key], dict) and isinstance(edited[key], dict):
+            if not config_changes(baseline[key], edited[key], (key,)):
+                continue
+            if key in {"directory", "filename"} and list(baseline[key]) != list(edited[key]):
+                result[key] = copy.deepcopy(edited[key])
+                continue
             previous = original.get(key)
             nested = apply_config_delta(previous if isinstance(previous, dict) else {}, baseline[key], edited[key])
-            if nested != previous:
+            if nested != previous or (isinstance(previous, dict) and config_changes(previous, nested)):
                 result[key] = nested
         elif type(baseline[key]) is not type(edited[key]) or baseline[key] != edited[key]:
             result[key] = copy.deepcopy(edited[key])
@@ -201,13 +204,16 @@ def edit_config_path(data: dict, path: ConfigPath, value: object = None, *, remo
 
 def config_changes(original: dict, updated: dict, prefix: ConfigPath = ()) -> list[tuple[ConfigPath, bool]]:
     """Describe changed paths without exposing their values or login secrets."""
+    if prefix and prefix[-1] in {"directory", "filename"} and list(original) != list(updated):
+        # Rule dictionaries are evaluated in insertion order by gallery-dl.
+        return [(prefix, False)]
     changes = []
     for key in sorted(set(original) | set(updated)):
         path = prefix + (key,)
         if key not in updated:
             changes.append((path, True))
         elif key not in original:
-            if isinstance(updated[key], dict):
+            if isinstance(updated[key], dict) and updated[key]:
                 changes.extend(config_changes({}, updated[key], path))
             else:
                 changes.append((path, False))

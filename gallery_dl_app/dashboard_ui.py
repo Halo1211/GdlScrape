@@ -261,7 +261,9 @@ class DashboardUiMixin:
         self.txt_commands.setObjectName("linkEditor")
         self.txt_commands.setPlaceholderText("Paste URL or full gallery-dl command\nOne entry per line…")
         self.txt_commands.setMinimumHeight(190)
-        self.txt_commands.setMaximumBlockCount(20000)
+        # Log widgets may evict old lines; an editable queue must never do so.
+        # The parser validates source/job limits and reports oversized input.
+        self.txt_commands.setMaximumBlockCount(0)
         self.txt_commands.textChanged.connect(self.on_text_changed)
         links_l.addWidget(self.txt_commands)
         input_buttons = QGridLayout()

@@ -163,8 +163,10 @@ def _filter_value(raw: str) -> str:
     try:
         value = ast.literal_eval(raw)
     except (SyntaxError, ValueError):
-        if re.fullmatch(r"-?\d+(?:\.\d+)?", raw):
-            return raw
+        if re.fullmatch(r"-?[0-9]+", raw):
+            # Decimal IDs copied with leading zeroes are not legal Python
+            # integer literals. Normalize them before building the expression.
+            return repr(int(raw, 10))
         return repr(raw)
     return repr(validate_finite_numbers(value))
 

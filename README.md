@@ -9,7 +9,7 @@
 <h1 align="center">GdlScrape</h1>
 
 <p align="center">
-  <img alt="Version 1.0.3" src="https://img.shields.io/badge/version-1.0.3-35e5c7">
+  <img alt="Version 1.0.4" src="https://img.shields.io/badge/version-1.0.4-35e5c7">
   <a href="https://github.com/Halo1211/GdlScrape/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/Halo1211/GdlScrape/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Python 3.10+" src="https://img.shields.io/badge/Python-3.10%2B-48bfe3">
   <img alt="PySide6" src="https://img.shields.io/badge/UI-PySide6-f038d1">
@@ -117,8 +117,7 @@ account editor. Saved passwords and tokens use the operating-system credential
 vault; temporary credential configs are cleaned up after use.
 
 Configs, cookies, caches, backups, and downloaded files may contain private data.
-Review them before sharing. Screenshots in this repository use an isolated demo
-session.
+Review them before sharing.
 
 ## Application data
 
@@ -140,7 +139,7 @@ To build the Windows package:
 ```
 
 The script produces `release/GdlScrape/GdlScrape.exe`,
-`release/GdlScrape-v1.0.3-win64.zip`, and checksums. Building locally does not publish
+`release/GdlScrape-v1.0.4-win64.zip`, and checksums. Building locally does not publish
 a GitHub release.
 
 ## License and support

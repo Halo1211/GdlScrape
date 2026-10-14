@@ -98,6 +98,10 @@ def validate_supported_url(value: str, site: str = "") -> tuple[str, str]:
         parsed = urlsplit(value)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
             raise ValueError("Use a complete http:// or https:// website URL")
+        # hostname access does not validate ports; direct-link extractors can
+        # otherwise recognize an URL that the HTTP client cannot request.
+        if parsed.netloc.endswith(":") or parsed.port == 0:
+            raise ValueError("Use a valid URL port")
     except ValueError as exc:
         raise ValueError("Use a complete http:// or https:// website URL") from exc
     from gallery_dl import extractor

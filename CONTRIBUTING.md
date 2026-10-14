@@ -19,10 +19,12 @@ Run the application with `python -m gallery_dl_app`.
 ```powershell
 python -m ruff check .
 python -m pytest -q
+python -m build
 ```
 
 Pytest runs both function-based tests and the existing unittest cases. CI runs
-these checks on Windows with Python 3.10 and 3.12.
+lint, tests, and wheel/source distribution builds on Windows with Python 3.10
+and 3.12.
 
 Add regression coverage for changes to parsing, config preservation, persistence,
 worker lifecycles, or credential handling. For visual changes, check the relevant
