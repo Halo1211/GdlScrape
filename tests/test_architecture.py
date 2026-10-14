@@ -174,14 +174,17 @@ class ArchitectureTests(unittest.TestCase):
         from unittest.mock import Mock
 
         analysis = Mock(return_value=SimpleNamespace(binaries=[], pure=[], scripts=[], datas=[]))
+        executable = Mock()
         packages = ("gallery_dl.extractor", "gallery_dl.downloader", "gallery_dl.postprocessor")
         with patch("PyInstaller.utils.hooks.collect_submodules", side_effect=lambda name: [name + ".fixture"]) as collect:
             runpy.run_path("packaging/GdlScrape.spec", init_globals={
                 "SPECPATH": str(Path("packaging").resolve()), "Analysis": analysis,
-                "PYZ": Mock(), "EXE": Mock(), "COLLECT": Mock(),
+                "PYZ": Mock(), "EXE": executable, "COLLECT": Mock(),
             })
         self.assertEqual([call.args[0] for call in collect.call_args_list], list(packages))
         self.assertEqual(analysis.call_args.kwargs["hiddenimports"], [name + ".fixture" for name in packages])
+        executable.assert_called_once()
+        self.assertEqual(executable.call_args.kwargs["name"], "GdlScrape")
 
     def test_responsibilities_live_in_separate_mixins(self):
         self.assertIn("_build_ui", UiShellMixin.__dict__)
@@ -788,20 +791,19 @@ class ArchitectureTests(unittest.TestCase):
                 window.close()
                 app.processEvents()
 
-    def test_packaged_app_uses_its_bundled_downloader_after_session_restore(self):
+    def test_packaged_app_uses_its_internal_downloader_after_session_restore(self):
         with patch.object(ReportsMixin, "_load_autosave_silently", lambda _self: None):
             app, window = package.create_application([])
         try:
             with tempfile.TemporaryDirectory() as folder:
                 app_exe = Path(folder) / "GdlScrape.exe"
-                bundled = Path(folder) / "gallery-dl.exe"
                 app_exe.touch()
-                bundled.touch()
                 with patch("gallery_dl_app.system_tools.sys.executable", str(app_exe)), patch(
                     "gallery_dl_app.system_tools.sys.frozen", True, create=True
                 ):
                     window.apply_session_data({"gdl_cmd": "C:/old/gallery-dl.exe", "commands": ""})
-                    self.assertEqual(Path(window.gdl_cmd).resolve(), bundled.resolve())
+                    self.assertEqual(package.command_string_to_argv(window.gdl_cmd), [str(app_exe.resolve()), "--gallery-dl"])
+                    self.assertFalse(app_exe.with_name("gallery-dl.exe").exists())
                     runtime = window._build_runtime_tab()
                     self.assertFalse(runtime.findChildren(QPushButton))
         finally:

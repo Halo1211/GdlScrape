@@ -45,7 +45,8 @@ in [SECURITY.md](SECURITY.md).
 ## Build a Windows package
 
 Run `.\scripts\build_windows.ps1` from PowerShell. The build includes gallery-dl,
-its dynamic modules, configuration assets, and Windows version metadata. Test the
+its dynamic modules, configuration assets, and Windows version metadata in one
+application executable with an `_internal` support folder. Test the
 complete extracted folder, including a local download and any changed processing
 features, before distributing the ZIP.
 

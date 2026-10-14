@@ -42,6 +42,7 @@ from .core import (
     atomic_write_text,
     command_executable_available,
     detect_config_path,
+    find_gallery_dl,
     open_path,
     parse_text_database,
     quote_arg_for_preview,
@@ -1347,11 +1348,10 @@ Notes:
         # session cannot partially apply and then leave stale queue state.
         parse_text_database(commands_text)
         saved_cmd = (data.get("gdl_cmd") or "").strip()
-        bundled_cmd = Path(sys.executable).resolve().with_name("gallery-dl.exe") if getattr(sys, "frozen", False) else None
-        if bundled_cmd is not None and bundled_cmd.is_file():
+        if getattr(sys, "frozen", False):
             # A session written by a source install or older one-file release
             # must not silently replace the downloader shipped with this EXE.
-            self.gdl_cmd = str(bundled_cmd)
+            self.gdl_cmd = find_gallery_dl()
         elif REDACTED in saved_cmd:
             self.append_log(
                 "[session] ignored a gallery-dl command whose credentials "

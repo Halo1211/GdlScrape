@@ -4,6 +4,10 @@ GdlScrape separates GUI composition, configuration transformations, persistence,
 and background work. `MainWindow` combines controller mixins; gallery-dl performs
 the actual extraction and downloading in subprocesses.
 
+Windows bundles use `GdlScrape.exe` for both the GUI and internal download
+subprocesses. The internal engine mode forwards arguments to gallery-dl without
+opening the GUI. A separate `gallery-dl.exe` is not distributed.
+
 ## Module responsibilities
 
 | Area | Modules | Responsibility |

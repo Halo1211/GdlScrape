@@ -19,6 +19,7 @@
 
 ### Changed
 
+- Windows packages use one GdlScrape executable with an internal download engine.
 - Public documentation uses English and omits internal audit notes.
 - CI builds Python distributions alongside lint and regression checks.
 

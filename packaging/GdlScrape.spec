@@ -14,7 +14,7 @@ for package in ("gallery_dl.extractor", "gallery_dl.downloader", "gallery_dl.pos
     gallery_dl_hiddenimports.extend(collect_submodules(package))
 
 a = Analysis(
-    [str(project_root / "gdlscrape.py"), str(project_root / "packaging" / "gallery_dl_cli.py")],
+    [str(project_root / "gdlscrape.py")],
     pathex=[str(project_root)],
     binaries=[],
     datas=[(str(project_root / "gallery_dl_app" / "assets"), "gallery_dl_app/assets")],
@@ -36,12 +36,9 @@ a.binaries = [
 ]
 
 pyz = PYZ(a.pure)
-gui_scripts = [entry for entry in a.scripts if entry[0] != "gallery_dl_cli"]
-cli_scripts = [entry for entry in a.scripts if entry[0] != "gdlscrape"]
-
 exe = EXE(
     pyz,
-    gui_scripts,
+    a.scripts,
     [],
     exclude_binaries=True,
     name="GdlScrape",
@@ -51,7 +48,9 @@ exe = EXE(
     upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,
+    # Keep redirected engine I/O available, while hiding a desktop-owned console.
+    console=True,
+    hide_console="hide-early",
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
@@ -61,21 +60,8 @@ exe = EXE(
     icon=[str(project_root / "packaging" / "gdlscrape.ico")],
 )
 
-gallery_dl_exe = EXE(
-    pyz,
-    cli_scripts,
-    [],
-    exclude_binaries=True,
-    name="gallery-dl",
-    console=True,
-    upx=False,
-    version=str(project_root / "packaging" / "version_info.txt"),
-    icon=[str(project_root / "packaging" / "gdlscrape.ico")],
-)
-
 coll = COLLECT(
     exe,
-    gallery_dl_exe,
     a.binaries,
     a.datas,
     name="GdlScrape",

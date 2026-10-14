@@ -42,9 +42,9 @@ and manage downloads through a visual queue.
 2. Extract the complete archive.
 3. Run `GdlScrape.exe` inside the extracted `GdlScrape` folder.
 
-Keep `gallery-dl.exe` and the `_internal` folder beside the application. Portable
-builds include Python and gallery-dl. Use the supplied `SHA256SUMS.txt` to verify
-release files.
+Keep the `_internal` folder beside `GdlScrape.exe`. Portable builds include
+Python and the gallery-dl engine as internal dependencies; there is no separate
+`gallery-dl.exe`. Use the supplied `SHA256SUMS.txt` to verify release files.
 
 ### Run from source
 
@@ -147,6 +147,9 @@ a GitHub release.
 GdlScrape is an independent project and is not affiliated with gallery-dl. Use it
 for content you are permitted to access and retain.
 
-Licensed under the [MIT License](LICENSE). Report reproducible bugs through
+GdlScrape's source is licensed under the [MIT License](LICENSE). The bundled
+gallery-dl engine retains its own GPL-2.0-only license and attribution, included
+in the Windows package's `THIRD_PARTY_NOTICES.txt` and `gallery-dl-LICENSE.txt`.
+Report reproducible bugs through
 [GitHub Issues](https://github.com/Halo1211/GdlScrape/issues). For private security
 reports, follow [SECURITY.md](SECURITY.md).

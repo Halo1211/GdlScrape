@@ -7,7 +7,7 @@ import sys
 from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtWidgets import QApplication
 
-from .core import APP_NAME, IS_WINDOWS
+from .core import APP_NAME, GDL_ENGINE_FLAG, IS_WINDOWS
 from .themes import DARK_QSS, NativeWindowThemeFilter, application_icon, theme_palette
 from .window import MainWindow
 
@@ -43,6 +43,11 @@ def create_application(argv: list[str] | None = None) -> tuple[QApplication, Mai
 
 
 def main() -> int:
+    if sys.argv[1:2] == [GDL_ENGINE_FLAG]:
+        import gallery_dl
+
+        del sys.argv[1]
+        return gallery_dl.main()
     app, window = create_application()
     window.show()
     return app.exec()

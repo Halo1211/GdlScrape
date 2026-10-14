@@ -28,6 +28,8 @@ APP_NAME = "GdlScrape"
 
 APP_VERSION = "1.0.4"
 
+GDL_ENGINE_FLAG = "--gallery-dl"
+
 APP_DIR = Path.home() / ".gallery_dl_gui_dashboard"
 
 HISTORY_FILE = APP_DIR / "job_history.jsonl"
@@ -584,14 +586,10 @@ def command_executable_available(command: str | None) -> bool:
 
 def find_gallery_dl() -> str | None:
     if getattr(sys, "frozen", False):
-        bundled = Path(sys.executable).resolve().with_name("gallery-dl.exe" if IS_WINDOWS else "gallery-dl")
-        if bundled.is_file():
-            return str(bundled)
+        return f"{quote_arg_for_preview(str(Path(sys.executable).resolve()))} {GDL_ENGINE_FLAG}"
     exe = shutil.which("gallery-dl") or shutil.which("gallery-dl.exe")
     if exe:
         return exe
-    if getattr(sys, "frozen", False):
-        return None
     try:
         completed = subprocess.run(
             [sys.executable, "-m", "gallery_dl", "--version"],
@@ -1686,6 +1684,10 @@ def is_gallery_dl_invocation(tokens: list[str]) -> bool:
     first = _gdl_basename(tokens[0])
     if first == "gallery-dl":
         return True
+    if len(tokens) >= 2 and tokens[1] == GDL_ENGINE_FLAG and (
+        first == "gdlscrape" or (getattr(sys, "frozen", False) and first == _gdl_basename(sys.executable))
+    ):
+        return True
     if len(tokens) >= 3 and _is_python_launcher(tokens[0]) and tokens[1] == "-m" and tokens[2].replace("-", "_") == "gallery_dl":
         return True
     return False
@@ -1696,6 +1698,10 @@ def strip_gallery_dl_invocation(tokens: list[str]) -> list[str]:
     first = _gdl_basename(tokens[0])
     if first == "gallery-dl":
         return tokens[1:]
+    if len(tokens) >= 2 and tokens[1] == GDL_ENGINE_FLAG and (
+        first == "gdlscrape" or (getattr(sys, "frozen", False) and first == _gdl_basename(sys.executable))
+    ):
+        return tokens[2:]
     if len(tokens) >= 3 and _is_python_launcher(tokens[0]) and tokens[1] == "-m" and tokens[2].replace("-", "_") == "gallery_dl":
         return tokens[3:]
     return tokens
