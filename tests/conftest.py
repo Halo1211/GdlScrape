@@ -13,5 +13,12 @@ from PySide6.QtWidgets import QApplication
 def qt_app():
     # Icons and pixmaps also need an application, even when dialog widgets are
     # mocked. A strong session reference avoids native aborts between tests.
-    app = QApplication.instance() or QApplication([])
+    app = QApplication.instance()
+    owns_app = app is None
+    if owns_app:
+        app = QApplication([])
     yield app
+    if owns_app:
+        # Release Qt while its Python bindings are still intact, rather than
+        # deferring GUI teardown to interpreter finalization on Windows.
+        app.shutdown()
